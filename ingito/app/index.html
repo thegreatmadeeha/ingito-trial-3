@@ -1,0 +1,3383 @@
+/*
+  INGITO · ইঙ্গিত - the field instrument.
+
+  A satellite intelligence system brought down to human scale. Every screen follows one journey:
+    EARTH    the real piece of Bangladesh: a Sentinel-2 photograph of the district with its rivers,
+             villages, roads and shelters, all drawn from the pack on this device.
+    SIGNAL   what Sentinel-1's radar measured: the water, hatched teal, with its sensor, dates and
+             limits attached. Never presented as ground truth.
+    INSIGHT  what the signal means here: roads that run through that water, shelters clear of it
+             and the driest road to one, how much of each upazila went under and about how many
+             people live in that water.
+    ACTION   what the person on the ground does: record "water here" or "road cut", compare before
+             and after, hand the observations over.
+
+  Three jobs, in the order a responder needs them:
+    1. Hold one disaster pack on the device and keep working when the network dies.
+    2. Answer: where am I, which routes are under water, where is the nearest shelter.
+    3. Send the operator's own observations back.
+
+  Two native languages. Every word on screen comes from STRINGS below, written separately in
+  English and in Bangla - not translated word for word. Bangla uses Bangla numerals; coordinates
+  and scientific names (Sentinel-1, SAR) stay as the world writes them.
+
+  No map library and no CDN: both would need a network in exactly the situation this is built for.
+*/
+
+const PACK_CACHE = "ingito-pack-v1";
+const PACK_KEY = "/__ingito_pack__";          // cache key for whichever pack is loaded
+const REPORTS_KEY = "ingito.reports.v1";
+const THEME_KEY = "ingito.theme.v2";          // v2: light/dark (v1 stored day/night)
+const LANG_KEY = "ingito.lang.v1";
+const INDEX_URLS = ["../packs/index.json", "packs/index.json"];
+/* Inside another site's frame (the claude.ai preview link) the browser silently blocks printing,
+   downloads and opening other apps. There, a tap on those buttons says so instead of doing nothing. */
+const FRAMED = (() => { try { return window.top !== window.self; } catch (error) { return true; } })();
+const OWN_ADDRESS = "https://nishorgo3051.github.io/nsac2026nishorgo/ingito/app/";
+const PROBE_EVERY_MS = 20000;
+const PROBE_TIMEOUT_MS = 4000;
+const DELETE_ALL_PAUSE_MS = 800;      // "tap again" must be a second decision, not a double tap
+const DELETE_ALL_DISARM_MS = 5000;
+const GROUND_NEAR_M = 300;            // field reports this close count as "here" in the readout
+const NEAR_PLACE_M = 4000;            // a village this close names where the reticle is
+const ROUTE_REACH_M = 1000;           // a route starts or ends at most this far from a road in the pack
+const CUT_NEAR_M = 30;                // a road-cut report this close to a road closes the stretch it is on
+// ponytail: a calibration knob, not a measurement. With no dry route, 1 m through radar water
+// costs as much as this many metres of road; raise it if routes take water to save a short detour.
+const WATER_PENALTY = 20;
+const PANELS = ["more", "layers", "alerts", "area", "reports", "source", "packs"];
+/* A published build (an artifact page, or a single HTML file sent to somebody) has no packs folder
+   to fetch from, so the pack can be embedded in the page instead - as the pack file's exact text,
+   so the fingerprint worked out from it matches the one recorded when the pack was built. */
+const EMBEDDED_TEXT = typeof globalThis.INGITO_PACK_TEXT === "string" ? globalThis.INGITO_PACK_TEXT : null;
+const FONT = '"Inter", "Hind Siliguri", "Noto Sans Bengali", "Nirmala UI", system-ui, sans-serif';
+
+/*
+  The map's materials. ONE palette for both themes: light and dark change the instrument's
+  surfaces, never the picture of the Earth or the meaning of a mark. Every meaning is also carried
+  by a shape - hatching, a dash, a ring, a triangle - so no reading depends on telling colours apart.
+    EARTH    cream roads, pale-teal rivers, green shelter squares, white upazila dashes
+    SIGNAL   bright teal, hatched, with a hard edge: measured, not drawn
+    INSIGHT  red dashes on a dark casing: a road through that water. Shelter green under a white
+             halo: the road route to a shelter, dotted where it leaves the road
+    ACTION   red circle / triangle: a person's report. The operator: a dark dot, cream core, white ring
+*/
+const MAP = {
+  ground: "#0a2a22",                                   // under the photo, and when it is off
+  veil: "rgba(3, 22, 17, 0.6)",                        // outside the district: dimmed, not hidden
+  flood: "rgba(94, 224, 204, 0.3)", floodFar: "rgba(94, 224, 204, 0.92)",
+  floodWash: "#58b3a4",                                // multiplied into the photo: submerged land
+  floodHatch: "rgba(205, 252, 243, 0.72)", floodEdge: "#7ef0dc",
+  radarTint: "#d3efe8", radarEdge: "#5ee0cc",
+  road: "#eae6d9", roadCasing: "rgba(6, 22, 17, 0.85)", roadMinor: "rgba(234, 230, 217, 0.72)",
+  wetCasing: "#1b0507", wetDash: "#ff5361",            // sun red, lifted to hold on a dark casing
+  river: "rgba(150, 214, 201, 0.9)", riverLabel: "#d9f5ee",
+  riverOnPhoto: "rgba(150, 214, 201, 0.3)",            // close up the real river is in the photo
+  admin: "rgba(255, 255, 255, 0.78)", adminUnder: "rgba(0, 0, 0, 0.45)",
+  grid: "rgba(255, 255, 255, 0.12)", gridLabel: "rgba(255, 255, 255, 0.72)",
+  label: "#ffffff", halo: "rgba(4, 22, 17, 0.88)",
+  shelter: "#1e7d6b", shelterEdge: "#ffffff",
+  route: "#1e7d6b", routeHalo: "#ffffff",
+  report: "#e63946", reportEdge: "#ffffff",
+  you: "#0b3d32", youCore: "#eae6d9", youRing: "#ffffff",
+  shield: "#0b3d32",
+};
+
+/*
+  Declutter by zoom, in metres per screen pixel. At district view 1,853 village roads and every
+  stream would bury the flood layer, so detail arrives as you zoom in.
+*/
+const MINOR_ROADS = new Set(["unclassified"]);
+const MINOR_WATER = new Set(["stream", "drain"]);
+const SHOW_MINOR_BELOW = 25;
+const HATCH_FLOOD_BELOW = 30;
+const LABEL_SHELTERS_BELOW = 6;
+const PLACE_VISIBLE_BELOW = { city: 400, town: 400, suburb: 45, village: 45, hamlet: 14 };
+const PLACE_SIZE = { city: 15, town: 13.5, suburb: 12.5, village: 12.5, hamlet: 11.5 };
+/* How much of an upazila the radar saw under open water, in words. Stated openly in the Alerts
+   sheet: a description of the measurement, not a forecast. */
+const SEVERITY = [[3, "wide"], [1, "patchy"], [0, "little"]];
+
+/* ------------------------------------------------------------------ the two languages */
+
+const BN_DIGITS = "০১২৩৪৫৬৭৮৯";
+const MONTHS = {
+  en: ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"],
+  bn: ["জানুয়ারি", "ফেব্রুয়ারি", "মার্চ", "এপ্রিল", "মে", "জুন", "জুলাই", "আগস্ট", "সেপ্টেম্বর",
+       "অক্টোবর", "নভেম্বর", "ডিসেম্বর"],
+};
+
+const STRINGS = {
+  en: {
+    undo: "Undo", close: "Close",
+    waterHere: "Water here", roadCut: "Road cut",
+    alerts: "Alerts", area: "Area", reports: "Reports", source: "Source", layers: "Layers",
+    more: "More", sharePack: "Share pack",
+    locate: "Show where I am", lens: "Before / After", zoomIn: "Zoom in", zoomOut: "Zoom out",
+    toDark: "Switch to dark mode", toLight: "Switch to light mode",
+    search: "Search a place", searchAria: "Search the places in this pack",
+    noResults: "No place by that name in this pack",
+    gateTitle: "Satellite flood map that works with no signal",
+    gateSub: "Download it while you still have a connection. After that it needs no network at all: no map tiles, no services, no accounts.",
+    looking: "Looking for packs…",
+    openFile: "Or open a pack file handed to you by another team",
+    keyFlood: "Water seen by radar",
+    keyRadar: "Radar · dark = water",
+    clock: (h, m) => `${String(h).padStart(2, "0")}:${m} UTC+6`,
+    net: { online: "Online", nolink: "No link", offline: "Offline", checking: "Checking" },
+    recorded: (n) => `${n} recorded`,
+    before: (d) => `${d} · before`, during: (d) => `${d} · flood day`,
+    satTag: "Satellite", groundTag: "Ground",
+    whoGps: (acc) => `You (GPS ±${acc} m)`, whoCross: "Crosshair (no GPS)",
+    whoFar: "Crosshair (GPS outside this pack)",
+    outside: "Outside the pack area",
+    upazila: (name) => `${name} upazila`,
+    nearPlace: (name) => `near ${name}`,
+    radarWater: "Radar saw water here", radarDry: "Radar saw no water here",
+    limitShort: "Radar misses water under trees and between houses. Record what you see.",
+    groundNear: (n) => `${n} of your reports within ${num(GROUND_NEAR_M)} m`,
+    groundNone: "Nothing recorded here yet",
+    shelterLine: (dist, dir, kind, name) => `${dist} ${dir} · ${kind} (unverified)${name ? ` · ${name}` : ""}`,
+    shelterClear: "Nearest shelter outside the water radar saw",
+    noShelter: "No shelter point in this pack",
+    routeBy: (dist, dir, kind, name) => `${dist} by road, ${dir} · ${kind} (unverified)${name ? ` · ${name}` : ""}`,
+    routeDry: (dist, kind, name) => `${dist} by road, no radar water on it · ${kind} (unverified)${name ? ` · ${name}` : ""}`,
+    routeDryNote: "Uses only the roads in this pack. A road can still be blocked: check before you go. Tap to remove.",
+    routeWet: (dist, wet) => `${dist} by road · ${wet} of it through radar water`,
+    routeWetNote: (kind, name) => `To the ${kind} (unverified)${name ? ` ${name}` : ""}. Every route from the nearest road crosses radar water: you may need a boat. Tap to remove.`,
+    routeNoRoad: (dist) => `No road in this pack within ${dist} of here`,
+    routeNoLink: "No road in this pack links here to a shelter outside radar water",
+    routeCut: "Every road from here to a shelter passes a road reported cut",
+    routeCutsOut: "Roads reported cut are left out. ",
+    routeClear: "Tap to remove.",
+    peopleIn: (n) => ` WorldPop's model puts about ${n} people inside that water.`,
+    peopleNote: (year) => `People figures are WorldPop's ${year} model of where people live, in 100 m squares: an estimate, not a headcount. Radar misses water between houses, so they are probably low.`,
+    dirs: ["N", "NE", "E", "SE", "S", "SW", "W", "NW"],
+    kinds: { mosque: "mosque", school: "school", hospital: "hospital", clinic: "clinic" },
+    kindCount: (n, count, kind) => `${n} ${kind}${count === 1 ? "" : "s"}`,
+    kindNames: { upazila: "Upazila", city: "Town", town: "Town", suburb: "Neighbourhood", village: "Village",
+                 hamlet: "Village", river: "River", canal: "Canal", mosque: "Mosque", school: "School",
+                 hospital: "Hospital", clinic: "Clinic" },
+    km: (v) => `${v} km`, m: (v) => `${v} m`,
+    noteSaved: (type, n, stored, gps) =>
+      `${type.toUpperCase()} #${n} ${stored ? "saved on this phone" : "NOT SAVED"}<small>` +
+      `${stored ? "" : "this browser refused storage · "}${gps ? "at your GPS position" : "at the crosshair"}</small>`,
+    noteRemoved: (type, left) =>
+      `${type.toUpperCase()} removed<small>${left} report${left === "1" ? "" : "s"} left on this device</small>`,
+    noteNoFix: (problem) =>
+      `No GPS fix yet<small>${problem} Until there is one, the card and every report use the crosshair.</small>`,
+    noteFar: "Your GPS position is outside this pack<small>The card and every report use the crosshair.</small>",
+    gps: {
+      searching: "The GPS is still searching.",
+      refused: "Location permission was refused in this browser.",
+      unavailable: "The phone cannot work out its position.",
+      none: "This device has no GPS.",
+    },
+    layerGroups: { earth: "Earth · the ground itself", signal: "Signal · measured from orbit",
+                   insight: "Insight · worked out from the signal", field: "Field · seen by people" },
+    layerNames: {
+      photo: "Satellite photo", terrain: "Terrain relief", waterways: "Rivers and canals", roads: "Roads",
+      places: "Villages and places", shelters: "Shelter points (unverified)", admin: "Upazila boundaries",
+      flood: "Water seen by radar", wet: "Roads through that water", reports: "My field reports",
+      route: "Road route to a shelter",
+    },
+    layerSubs: {
+      photo: (d) => `Sentinel-2 · ${d} · before the flood`, terrain: "Copernicus DEM", waterways: "OpenStreetMap",
+      roads: "OpenStreetMap", places: "OpenStreetMap, GeoNames", shelters: "Mosques, schools, clinics · OpenStreetMap",
+      admin: "Official upazila outlines", flood: (d) => `Sentinel-1 radar · ${d}`,
+      wet: "Calculated from the radar layer", reports: "Stored on this phone",
+    },
+    layersNote: "Village roads, streams and small places appear as you zoom in.",
+    alertsTitle: "Alerts from the satellite",
+    alertsLead: (date) => `What Sentinel-1 radar saw on ${date}, upazila by upazila. Most water first.`,
+    newWater: "New open water",
+    sev: { wide: "Widespread", patchy: "Patchy", little: "Little" },
+    locLine: (district, division) => `Upazila · ${district} district${division ? ` · ${division} Division` : ""}`,
+    whenLine: (date, time, base) => `${date}, ${time} · compared with ${base}`,
+    why: (km2, pct) => `${km2} km² of land newly under open water: ${pct}% of the upazila.`,
+    roadsCross: (n, count) => (count === 1 ? " One road crosses it." : count ? ` ${n} roads cross it.` : ""),
+    basis: "Based on Sentinel-1 SAR · open water only",
+    viewArea: "View area",
+    districtTitle: (d) => `${d} district`,
+    districtWhy: (km2, patches) => `${km2} km² of new open water, in ${patches} separate patches.`,
+    sevNote: "The label says how much of each upazila radar saw under open water: widespread is 3% or more, patchy 1 to 3%, little under 1%. It is not a forecast, and radar misses water among trees and houses.",
+    sec: { overview: "Overview", signal: "Satellite signal", change: "Change", ground: "Ground context", next: "Next" },
+    coordLine: (lat, lon, km2) => `${lat} N, ${lon} E · ${km2} km²`,
+    overview: (name, km2, pct, top) => `Radar saw ${km2} km² of new open water in ${name}: ${pct}% of the upazila${top ? ", the highest share in the district" : ""}.`,
+    noOverview: "The radar layer has no figure for this upazila.",
+    signalLine: (platform, date, time) => `${platform} · C-band SAR, VH polarisation · ${date}, ${time}`,
+    signalWhat: "Radar sees calm, open water as dark. Water among crops, trees and houses is missed, so the real extent is larger than this.",
+    changeLine: (before, during, km2) => `From ${before} to ${during}: ${km2} km² more open water.`,
+    placesHere: (n) => `${n} named places`,
+    roadsWet: (n) => `${n} roads cross radar water`,
+    sheltersLine: (n, parts) => (parts ? `${n} shelter points, unverified (${parts})` : "No shelter point in the pack for this upazila"),
+    sheltersWet: (n) => `${n} of them stand in radar water`,
+    myReports: (n, total) => (total ? `${n} of your field reports` : "None of your field reports yet"),
+    viewOnMap: "View on map", compare: "Before / After",
+    reportsTitle: (n) => `My field observations (${n})`,
+    reportsEmpty: "No field reports yet. When you see water or a cut road that the satellite layer does not show, tap WATER HERE or ROAD CUT.",
+    reportsStored: "Kept separate from the satellite layer and never merged into it.",
+    syncLine: "Saved on this phone only. Nothing is sent automatically: export the file and hand it over when you have a connection.",
+    atCrosshair: "placed at the crosshair", gpsAcc: (m) => `GPS ± ${m} m`,
+    delete: "Delete", deleteAria: (n) => `Delete report ${n}`,
+    exportBtn: "Export for handover", saveFile: "Save the file",
+    exportCopy: (n) => `${n} observations as GeoJSON. Copy this if the file cannot be saved:`,
+    exportNone: "Nothing to export yet.",
+    smsSend: "Text my reports (SMS)",
+    smsNote: "Opens your messages app with your reports written in, or copy the message and paste it there yourself. Send it to the coordinator. Needs a little phone signal, not internet.",
+    smsCopy: "Copy the message",
+    smsCopied: "Copied. Open your messages app, paste it and send it to the coordinator.",
+    smsCopyHand: "Copy this by hand:",
+    framedNote: (url) => `This preview link blocks printing, saving files and opening other apps. They all work at Ingito's own address: ${url}`,
+    smsInTitle: "Reports someone texted you",
+    smsInHint: "Paste the whole message. Only Ingito report lines are read.",
+    smsAdd: "Add to the map",
+    smsAdded: (n, known) => `${n} report${n === "1" ? "" : "s"} added${known ? `, ${known} already here` : ""}.`,
+    smsNone: "No Ingito report lines in that text.",
+    smsNothingNew: (known) => `Nothing new: ${known === "1" ? "it is" : `all ${known} are`} already here.`,
+    bySms: "by text message",
+    printBtn: "Print this map",
+    printNote: "Prints what the screen shows now, with its date and file code. With no printer, choose Save as PDF.",
+    printFoot: (when) => `Printed ${when} from Ingito. North is up. Red marks are field reports, what people saw; they are not satellite data.`,
+    deleteAll: "Delete all reports", deleteAllArmed: (n) => `Tap again to delete all ${n}`,
+    downloadPack: "Download this pack",
+    mapArea: (km2) => `map area ${km2} km²`,
+    labelSub: "A satellite flood map that works with no signal. Check what it shows before you rely on it.",
+    labelRows: { seen: "Radar saw this", age: "Age", covers: "Covers", shows: "Shows", code: "File code" },
+    labelSeen: (date, time, platform) => `${date}${time ? `, ${time}` : ""} · ${platform}`,
+    ageLine: (days, n) => (days < 1 ? "Seen today" : days === 1 ? "1 day old" : `${n} days old`),
+    oldWarn: "Conditions may have changed since this observation.",
+    coversLine: (km2, n, one) => `${km2} km² · ${n} upazila${one ? "" : "s"}`,
+    showsLine: "Open water seen by radar only. It misses water under trees and between houses.",
+    codeNote: "Read it aloud: a phone holding the same map shows the same code.",
+    codeWorking: "working it out…",
+    openMap: "Open the map",
+    cutFrom: "Cut from",
+    packs: "Packs", packsHere: "On this phone",
+    packLine: (mb, code) => `${mb} MB${code ? ` · file code ${code}` : ""}`,
+    savePack: "Save as a file", openOther: "Open another pack", backToFull: "Reopen the full pack",
+    packsNote: "Pass a saved pack to another phone with Quick Share or Bluetooth, and open it there with Open another pack. Opening a pack replaces the one on this phone; your reports stay.",
+    cutTitle: "Make a smaller pack",
+    cutWhen: (date) => `Radar observation: ${date}, the only one in this pack.`,
+    cutArea: "Area", wholeDistrict: "Whole district", cutInfo: "Information",
+    cutRows: { flood: "Water seen by radar", pictures: "Satellite pictures", roads: "Roads",
+               reference: "Rivers, places and terrain", shelters: "Shelter points (unverified)" },
+    cutSubs: { flood: "Always included: without it the card would say radar saw no water",
+               pictures: "The photo and the before / after radar", roads: "With the stretches through radar water",
+               reference: "For finding your way", shelters: "Mosques, schools, clinics" },
+    cutSize: (mb, of) => `${mb} MB of ${of} MB`,
+    saveCut: "Save the smaller pack",
+    noPacks: "No pack on this device, and no pack list reachable.",
+    noPacksHelp: "Open a pack file below, or connect and reload.",
+    starting: "starting the download…",
+    downloading: (mb, total, pct) => total ? `downloading ${mb} of ${total} MB (${pct}%)` : `downloading ${mb} MB`,
+    storing: "storing the pack on this device…",
+    refusedStorage: "warning: this browser refused local storage",
+    couldNot: (msg) => `could not download: ${msg}`,
+    reading: (name) => `reading ${name}…`,
+    notPack: (msg) => `not a usable pack: ${msg}`,
+    loadedFrom: {
+      device: "this device (offline store)", embeddedKept: "embedded in this page, stored on this device",
+      embedded: "embedded in this page", downloadedNotStored: "downloaded, not stored locally",
+      file: (name, kept) => `file: ${name}${kept ? ", stored on this device" : ""}`,
+    },
+    offlineReady: "Everything in this pack works with no network.",
+    offlineNot: "Not stored on this phone: opening it again will need a network.",
+    linkWords: {
+      online: "online - a request to the network was answered",
+      nolink: "radio on, but nothing answers - treat as offline",
+      offline: "offline - the radio is off", checking: "checking",
+    },
+  },
+
+  bn: {
+    undo: "বাতিল", close: "বন্ধ করুন",
+    waterHere: "এখানে পানি", roadCut: "রাস্তা বন্ধ",
+    alerts: "সতর্কতা", area: "এলাকা", reports: "রিপোর্ট", source: "তথ্যসূত্র", layers: "লেয়ার",
+    more: "আরও", sharePack: "প্যাক শেয়ার করুন",
+    locate: "আমি কোথায় দেখান", lens: "আগে / পরে", zoomIn: "কাছে আনুন", zoomOut: "দূরে নিন",
+    toDark: "অন্ধকার মোডে যান", toLight: "আলো মোডে যান",
+    search: "জায়গার নাম লিখুন", searchAria: "এই প্যাকের জায়গা খুঁজুন",
+    noResults: "এই নামে কোনো জায়গা এই প্যাকে নেই",
+    gateTitle: "নেটওয়ার্ক ছাড়াই চলে এমন স্যাটেলাইট বন্যা-মানচিত্র",
+    gateSub: "নেটওয়ার্ক থাকতে থাকতেই প্যাকটি নামিয়ে রাখুন। এরপর আর কোনো সংযোগ লাগবে না — না ম্যাপ টাইল, না সার্ভার, না অ্যাকাউন্ট।",
+    looking: "প্যাক খোঁজা হচ্ছে…",
+    openFile: "অথবা অন্য দলের কাছ থেকে পাওয়া প্যাক ফাইল খুলুন",
+    keyFlood: "রাডারে দেখা পানি",
+    keyRadar: "রাডার · কালো = পানি",
+    clock: (h, m) => {
+      const period = h < 4 ? "রাত" : h < 12 ? "সকাল" : h < 15 ? "দুপুর" : h < 18 ? "বিকেল" : h < 20 ? "সন্ধ্যা" : "রাত";
+      return `${period} ${((h + 11) % 12) + 1}:${m}`;
+    },
+    net: { online: "অনলাইন", nolink: "নেট পাচ্ছে না", offline: "অফলাইন", checking: "যাচাই হচ্ছে" },
+    recorded: (n) => `${n}টি জমা`,
+    before: (d) => `${d} · আগে`, during: (d) => `${d} · বন্যার দিন`,
+    satTag: "স্যাটেলাইট", groundTag: "মাঠ",
+    whoGps: (acc) => `আপনি (জিপিএস ±${acc} মি)`, whoCross: "নিশানা (জিপিএস নেই)",
+    whoFar: "নিশানা (জিপিএস প্যাকের এলাকার বাইরে)",
+    outside: "প্যাকের এলাকার বাইরে",
+    upazila: (name) => `${name} উপজেলা`,
+    nearPlace: (name) => `কাছেই ${name}`,
+    radarWater: "রাডারে এখানে পানি ধরা পড়েছে", radarDry: "রাডারে এখানে পানি ধরা পড়েনি",
+    limitShort: "গাছপালার নিচে বা ঘরবাড়ির ফাঁকে জমা পানি রাডারে ধরা পড়ে না। নিজের চোখে যা দেখছেন, জানিয়ে দিন।",
+    groundNear: (n) => `${num(GROUND_NEAR_M)} মিটারের মধ্যে আপনার ${n}টি রিপোর্ট`,
+    groundNone: "এখানে এখনো কিছু জানানো হয়নি",
+    shelterLine: (dist, dir, kind, name) => `${dist} ${dir} · ${kind} (যাচাই হয়নি)${name ? ` · ${name}` : ""}`,
+    shelterClear: "রাডারে দেখা পানির বাইরে সবচেয়ে কাছের আশ্রয়",
+    noShelter: "এই প্যাকে কোনো আশ্রয়ের জায়গা নেই",
+    routeBy: (dist, dir, kind, name) => `রাস্তায় ${dist}, ${dir} · ${kind} (যাচাই হয়নি)${name ? ` · ${name}` : ""}`,
+    routeDry: (dist, kind, name) => `রাস্তায় ${dist}, পথে রাডারে দেখা পানি নেই · ${kind} (যাচাই হয়নি)${name ? ` · ${name}` : ""}`,
+    routeDryNote: "শুধু এই প্যাকের রাস্তা ধরে হিসাব। রাস্তা তবুও বন্ধ থাকতে পারে: রওনা দেওয়ার আগে খোঁজ নিন। সরাতে চাপুন।",
+    routeWet: (dist, wet) => `রাস্তায় ${dist} · এর ${wet} রাডারে দেখা পানির ভেতর দিয়ে`,
+    routeWetNote: (kind, name) => `গন্তব্য: ${kind} (যাচাই হয়নি)${name ? ` ${name}` : ""}। সবচেয়ে কাছের রাস্তা থেকে প্রতিটি পথই রাডারে দেখা পানি পার হয়: নৌকা লাগতে পারে। সরাতে চাপুন।`,
+    routeNoRoad: (dist) => `এখান থেকে ${dist}-এর মধ্যে এই প্যাকে কোনো রাস্তা নেই`,
+    routeNoLink: "এই প্যাকের কোনো রাস্তা এখান থেকে রাডারে দেখা পানির বাইরের কোনো আশ্রয়ে যায় না",
+    routeCut: "এখান থেকে আশ্রয়ে যাওয়ার প্রতিটি পথেই রিপোর্টে বন্ধ বলা রাস্তা পড়ে",
+    routeCutsOut: "রিপোর্টে বন্ধ বলা রাস্তাগুলো বাদ দেওয়া হয়েছে। ",
+    routeClear: "সরাতে চাপুন।",
+    peopleIn: (n) => ` WorldPop-এর মডেল অনুযায়ী ওই পানির ভেতরে প্রায় ${n} মানুষের বাস।`,
+    peopleNote: (year) => `মানুষের সংখ্যাগুলো WorldPop-এর ${year} সালের মডেল: ১০০ মিটারের ঘরে ঘরে মানুষ কোথায় থাকে তার আনুমানিক হিসাব, মাথা গুনে নয়। ঘরবাড়ির ফাঁকের পানি রাডারে ধরা পড়ে না, তাই আসল সংখ্যা সম্ভবত বেশি।`,
+    dirs: ["উত্তরে", "উত্তর-পূর্বে", "পূর্বে", "দক্ষিণ-পূর্বে", "দক্ষিণে", "দক্ষিণ-পশ্চিমে", "পশ্চিমে", "উত্তর-পশ্চিমে"],
+    kinds: { mosque: "মসজিদ", school: "স্কুল", hospital: "হাসপাতাল", clinic: "ক্লিনিক" },
+    kindCount: (n, count, kind) => `${n}টি ${kind}`,
+    kindNames: { upazila: "উপজেলা", city: "শহর", town: "শহর", suburb: "মহল্লা", village: "গ্রাম", hamlet: "গ্রাম",
+                 river: "নদী", canal: "খাল", mosque: "মসজিদ", school: "স্কুল", hospital: "হাসপাতাল", clinic: "ক্লিনিক" },
+    km: (v) => `${v} কিমি`, m: (v) => `${v} মিটার`,
+    noteSaved: (type, n, stored, gps) =>
+      `${type} #${n} — ${stored ? "এই ফোনে জমা হলো" : "জমা হয়নি"}<small>` +
+      `${stored ? "" : "এই ব্রাউজার জমা রাখতে দিচ্ছে না · "}${gps ? "আপনার জিপিএস অবস্থানে" : "নিশানার জায়গায়"}</small>`,
+    noteRemoved: (type, left) => `${type} — বাতিল হলো<small>এই ফোনে আর ${left}টি রিপোর্ট আছে</small>`,
+    noteNoFix: (problem) =>
+      `এখনো জিপিএস পাওয়া যায়নি<small>${problem} ততক্ষণ কার্ডের তথ্য আর সব রিপোর্ট নিশানার জায়গা ধরে হবে।</small>`,
+    noteFar: "আপনার জিপিএস অবস্থান এই প্যাকের এলাকার বাইরে<small>কার্ডের তথ্য আর সব রিপোর্ট নিশানার জায়গা ধরে হবে।</small>",
+    gps: {
+      searching: "জিপিএস এখনো খুঁজছে।",
+      refused: "এই ব্রাউজারে লোকেশনের অনুমতি দেওয়া হয়নি।",
+      unavailable: "ফোন নিজের অবস্থান বের করতে পারছে না।",
+      none: "এই যন্ত্রে জিপিএস নেই।",
+    },
+    layerGroups: { earth: "ভূমি · মাটির আসল চেহারা", signal: "সংকেত · স্যাটেলাইটের মাপা",
+                   insight: "বিশ্লেষণ · সংকেত থেকে বের করা", field: "মাঠ · মানুষের চোখে দেখা" },
+    layerNames: {
+      photo: "স্যাটেলাইট ছবি", terrain: "ভূমির উঁচু-নিচু", waterways: "নদী ও খাল", roads: "রাস্তা",
+      places: "গ্রাম ও জায়গার নাম", shelters: "আশ্রয়ের জায়গা (যাচাই হয়নি)", admin: "উপজেলার সীমানা",
+      flood: "রাডারে দেখা পানি", wet: "ওই পানির ওপর দিয়ে যাওয়া রাস্তা", reports: "আমার মাঠের রিপোর্ট",
+      route: "আশ্রয়ে যাওয়ার রাস্তা",
+    },
+    layerSubs: {
+      photo: (d) => `Sentinel-2 · ${d} · বন্যার আগের`, terrain: "Copernicus DEM", waterways: "OpenStreetMap",
+      roads: "OpenStreetMap", places: "OpenStreetMap, GeoNames", shelters: "মসজিদ, স্কুল, ক্লিনিক · OpenStreetMap",
+      admin: "সরকারি উপজেলা-সীমানা", flood: (d) => `Sentinel-1 রাডার · ${d}`,
+      wet: "রাডারের পানি থেকে হিসাব করা", reports: "এই ফোনে জমা",
+    },
+    layersNote: "কাছে গেলে গ্রামের রাস্তা, ছোট খাল আর ছোট জায়গার নাম দেখা যায়।",
+    alertsTitle: "স্যাটেলাইটের সতর্কবার্তা",
+    alertsLead: (date) => `${date} তারিখে Sentinel-1 রাডার কোন উপজেলায় কী দেখেছে। যেখানে পানি বেশি, সেটি আগে।`,
+    newWater: "নতুন খোলা পানি",
+    sev: { wide: "বিস্তৃত", patchy: "বিক্ষিপ্ত", little: "সামান্য" },
+    locLine: (district, division) => `উপজেলা · ${district} জেলা${division ? ` · ${division} বিভাগ` : ""}`,
+    whenLine: (date, time, base) => `${date}, ${time} · ${base}-এর তুলনায়`,
+    why: (km2, pct) => `${km2} বর্গকিমি জমি নতুন করে খোলা পানির নিচে — উপজেলার ${pct}%।`,
+    roadsCross: (n, count) => (count ? ` এর ওপর দিয়ে গেছে ${n}টি রাস্তা।` : ""),
+    basis: "Sentinel-1 SAR-এর ভিত্তিতে · শুধু খোলা পানি",
+    viewArea: "এলাকাটি দেখুন",
+    districtTitle: (d) => `${d} জেলা`,
+    districtWhy: (km2, patches) => `${patches}টি আলাদা জায়গায় মোট ${km2} বর্গকিমি নতুন খোলা পানি।`,
+    sevNote: "লেবেল বলে, প্রতিটি উপজেলার কতটা জায়গা রাডারে খোলা পানির নিচে দেখা গেছে: ৩% বা তার বেশি হলে বিস্তৃত, ১ থেকে ৩% বিক্ষিপ্ত, ১%-এর কম সামান্য। এটি পূর্বাভাস নয়; গাছপালা আর ঘরবাড়ির মাঝের পানি রাডারে ধরা পড়ে না।",
+    sec: { overview: "সংক্ষেপে", signal: "স্যাটেলাইটের সংকেত", change: "পরিবর্তন", ground: "মাটিতে যা আছে", next: "এরপর" },
+    coordLine: (lat, lon, km2) => `${lat} N, ${lon} E · ${km2} বর্গকিমি`,
+    overview: (name, km2, pct, top) => `${name} উপজেলার ${pct}% জায়গায়, মোট ${km2} বর্গকিমি, রাডারে নতুন খোলা পানি ধরা পড়েছে${top ? "। জেলায় এটিই সবচেয়ে বেশি" : ""}।`,
+    noOverview: "রাডারের স্তরে এই উপজেলার কোনো হিসাব নেই।",
+    signalLine: (platform, date, time) => `${platform} · C-band SAR, VH · ${date}, ${time}`,
+    signalWhat: "রাডারে স্থির, খোলা পানি কালো দেখায়। ফসল, গাছপালা আর ঘরবাড়ির মাঝের পানি ধরা পড়ে না, তাই আসল পানি এর চেয়ে বেশি।",
+    changeLine: (before, during, km2) => `${before} থেকে ${during}: খোলা পানি বেড়েছে ${km2} বর্গকিমি।`,
+    placesHere: (n) => `নামসহ ${n}টি জায়গা`,
+    roadsWet: (n) => `রাডারে দেখা পানির ওপর দিয়ে ${n}টি রাস্তা`,
+    sheltersLine: (n, parts) => (parts ? `${n}টি আশ্রয়ের জায়গা, যাচাই হয়নি (${parts})` : "এই উপজেলার কোনো আশ্রয়ের জায়গা প্যাকে নেই"),
+    sheltersWet: (n) => `এর ${n}টি রাডারে দেখা পানির মধ্যে`,
+    myReports: (n, total) => (total ? `আপনার ${n}টি মাঠের রিপোর্ট` : "এখানে আপনার কোনো রিপোর্ট এখনো নেই"),
+    viewOnMap: "মানচিত্রে দেখুন", compare: "আগে / পরে",
+    reportsTitle: (n) => `আমার মাঠের পর্যবেক্ষণ (${n})`,
+    reportsEmpty: "এখনো কোনো রিপোর্ট নেই। স্যাটেলাইটের মানচিত্রে নেই এমন পানি বা ভাঙা রাস্তা চোখে পড়লে ‘এখানে পানি’ বা ‘রাস্তা বন্ধ’ চাপুন।",
+    reportsStored: "স্যাটেলাইটের তথ্যের সঙ্গে এগুলো কখনো মেশানো হয় না।",
+    syncLine: "এগুলো শুধু এই ফোনেই আছে, নিজে থেকে কোথাও পাঠানো হয় না। নেট পেলে ফাইলটি এক্সপোর্ট করে হস্তান্তর করুন।",
+    atCrosshair: "নিশানার জায়গায় বসানো", gpsAcc: (m) => `জিপিএস ± ${m} মিটার`,
+    delete: "মুছুন", deleteAria: (n) => `${n} নম্বর রিপোর্ট মুছুন`,
+    exportBtn: "হস্তান্তরের ফাইল তৈরি করুন", saveFile: "ফাইলটি সেভ করুন",
+    exportCopy: (n) => `${n}টি পর্যবেক্ষণ, GeoJSON ফরম্যাটে। ফাইল সেভ না হলে এটুকু কপি করে নিন:`,
+    exportNone: "এক্সপোর্ট করার মতো কিছু এখনো নেই।",
+    smsSend: "রিপোর্টগুলো এসএমএসে পাঠান",
+    smsNote: "মেসেজ অ্যাপ খুলবে, রিপোর্টগুলো লেখা থাকবে; অথবা মেসেজটি কপি করে নিজেই সেখানে পেস্ট করুন। সমন্বয়কারীকে পাঠিয়ে দিন। ইন্টারনেট লাগে না, তবে মোবাইলে একটু নেটওয়ার্ক লাগে।",
+    smsCopy: "মেসেজটি কপি করুন",
+    smsCopied: "কপি হয়েছে। মেসেজ অ্যাপ খুলে পেস্ট করুন, তারপর সমন্বয়কারীকে পাঠান।",
+    smsCopyHand: "হাতে কপি করে নিন:",
+    framedNote: (url) => `এই প্রিভিউ লিংকে প্রিন্ট, ফাইল সেভ আর অন্য অ্যাপ খোলা বন্ধ থাকে। ইঙ্গিতের নিজের ঠিকানায় সবই কাজ করে: ${url}`,
+    smsInTitle: "এসএমএসে পাওয়া রিপোর্ট",
+    smsInHint: "পুরো মেসেজটি এখানে পেস্ট করুন। শুধু ইঙ্গিতের রিপোর্ট-লাইনগুলো পড়া হবে।",
+    smsAdd: "মানচিত্রে যোগ করুন",
+    smsAdded: (n, known) => `${n}টি রিপোর্ট যোগ হলো${known ? `, ${known}টি আগে থেকেই ছিল` : ""}।`,
+    smsNone: "এই লেখায় ইঙ্গিতের কোনো রিপোর্ট-লাইন নেই।",
+    smsNothingNew: (known) => `নতুন কিছু নেই: ${known}টিই আগে থেকে আছে।`,
+    bySms: "এসএমএসে পাওয়া",
+    printBtn: "মানচিত্রটি প্রিন্ট করুন",
+    printNote: "এখন পর্দায় যা আছে, তারিখ ও ফাইল কোডসহ প্রিন্ট হবে। প্রিন্টার না থাকলে Save as PDF বেছে নিন।",
+    printFoot: (when) => `${when}-এ ইঙ্গিত থেকে প্রিন্ট করা। মানচিত্রের উপরের দিক উত্তর। লাল চিহ্নগুলো মাঠের রিপোর্ট, মানুষের চোখে দেখা; স্যাটেলাইটের তথ্য নয়।`,
+    deleteAll: "সব রিপোর্ট মুছুন", deleteAllArmed: (n) => `সব ${n}টি মুছতে আবার চাপুন`,
+    downloadPack: "প্যাকটি নামিয়ে রাখুন",
+    mapArea: (km2) => `মানচিত্রের এলাকা ${km2} বর্গকিমি`,
+    labelSub: "নেটওয়ার্ক ছাড়াই চলে এমন স্যাটেলাইট বন্যা-মানচিত্র। ভরসা করার আগে দেখে নিন এতে কী আছে।",
+    labelRows: { seen: "রাডারে দেখা", age: "কত পুরোনো", covers: "এলাকা", shows: "যা দেখায়", code: "ফাইল কোড" },
+    labelSeen: (date, time, platform) => `${date}${time ? `, ${time}` : ""} · ${platform}`,
+    ageLine: (days, n) => (days < 1 ? "আজকের" : `${n} দিন আগের`),
+    oldWarn: "এই পর্যবেক্ষণের পর পরিস্থিতি বদলে থাকতে পারে।",
+    coversLine: (km2, n) => `${km2} বর্গকিমি · ${n}টি উপজেলা`,
+    showsLine: "শুধু রাডারে দেখা খোলা পানি। গাছপালার নিচে বা ঘরবাড়ির ফাঁকে জমা পানি রাডারে ধরা পড়ে না।",
+    codeNote: "জোরে পড়ে শোনান: একই মানচিত্র থাকলে অন্য ফোনেও এই কোডই দেখাবে।",
+    codeWorking: "হিসাব হচ্ছে…",
+    openMap: "মানচিত্র খুলুন",
+    cutFrom: "যে প্যাক থেকে কাটা",
+    packs: "প্যাক", packsHere: "এই ফোনে",
+    packLine: (mb, code) => `${mb} MB${code ? ` · ফাইল কোড ${code}` : ""}`,
+    savePack: "ফাইল হিসেবে সেভ করুন", openOther: "অন্য প্যাক খুলুন", backToFull: "পুরো প্যাক আবার খুলুন",
+    packsNote: "সেভ করা প্যাক Quick Share বা ব্লুটুথে অন্য ফোনে পাঠান, সেখানে ‘অন্য প্যাক খুলুন’ দিয়ে খুলুন। নতুন প্যাক খুললে এই ফোনের আগের প্যাকটি সরে যায়; আপনার রিপোর্ট থেকে যায়।",
+    cutTitle: "ছোট প্যাক বানান",
+    cutWhen: (date) => `রাডারের পর্যবেক্ষণ: ${date}, এই প্যাকে এটিই একমাত্র।`,
+    cutArea: "এলাকা", wholeDistrict: "পুরো জেলা", cutInfo: "তথ্য",
+    cutRows: { flood: "রাডারে দেখা পানি", pictures: "স্যাটেলাইট ছবি", roads: "রাস্তা",
+               reference: "নদী, জায়গার নাম ও ভূমির উঁচু-নিচু", shelters: "আশ্রয়ের জায়গা (যাচাই হয়নি)" },
+    cutSubs: { flood: "সব সময় থাকে: এটি না থাকলে কার্ড বলবে রাডারে পানি ধরা পড়েনি",
+               pictures: "ছবি আর রাডারের আগে / পরে", roads: "রাডারে দেখা পানির ওপর দিয়ে যাওয়া অংশসহ",
+               reference: "পথ চেনার জন্য", shelters: "মসজিদ, স্কুল, ক্লিনিক" },
+    cutSize: (mb, of) => `${of} MB-এর মধ্যে ${mb} MB`,
+    saveCut: "ছোট প্যাকটি সেভ করুন",
+    noPacks: "এই ফোনে কোনো প্যাক নেই, প্যাকের তালিকাও পাওয়া যাচ্ছে না।",
+    noPacksHelp: "নিচে প্যাক ফাইল খুলুন, অথবা নেট চালু করে আবার লোড করুন।",
+    starting: "নামানো শুরু হচ্ছে…",
+    downloading: (mb, total, pct) => total ? `নামছে: ${total} MB-এর ${mb} MB (${pct}%)` : `নামছে: ${mb} MB`,
+    storing: "প্যাকটি ফোনে জমা রাখা হচ্ছে…",
+    refusedStorage: "সতর্কতা: এই ব্রাউজার ফোনে জমা রাখতে দিচ্ছে না",
+    couldNot: (msg) => `নামানো গেল না: ${msg}`,
+    reading: (name) => `${name} পড়া হচ্ছে…`,
+    notPack: (msg) => `এটি ব্যবহারযোগ্য প্যাক নয়: ${msg}`,
+    loadedFrom: {
+      device: "এই ফোন (অফলাইন ভান্ডার)", embeddedKept: "এই পেজের ভেতরেই ছিল, ফোনে জমা রাখা হয়েছে",
+      embedded: "এই পেজের ভেতরেই ছিল", downloadedNotStored: "নামানো হয়েছে, ফোনে জমা হয়নি",
+      file: (name, kept) => `ফাইল: ${name}${kept ? ", ফোনে জমা রাখা হয়েছে" : ""}`,
+    },
+    offlineReady: "এই প্যাকের সবকিছু নেটওয়ার্ক ছাড়াই চলে।",
+    offlineNot: "ফোনে জমা হয়নি: আবার খুলতে নেট লাগবে।",
+    linkWords: {
+      online: "অনলাইন — নেটওয়ার্কে পাঠানো অনুরোধের জবাব এসেছে",
+      nolink: "রেডিও চালু, কিন্তু কোনো জবাব আসছে না — অফলাইন ধরে নিন",
+      offline: "অফলাইন — রেডিও বন্ধ", checking: "যাচাই হচ্ছে",
+    },
+  },
+};
+
+const el = (id) => document.getElementById(id);
+const canvas = el("map");
+const ctx = canvas.getContext("2d");
+
+const state = {
+  pack: null,
+  stats: null,                             // what the pack says per upazila, worked out once
+  network: null,                           // the pack's roads as a network, built on the first route
+  route: null,                             // the road route on the map: {from, path, shelter, metres, wet, dry} or {from, none}
+  index: [],                               // every searchable name in the pack
+  hits: [],                                // the search results on screen
+  images: {},                              // optical, before, during, terrain
+  source: null,                            // {key, file, kept}: where the pack was loaded from
+  fingerprint: undefined,                  // "CF29-FDAD"; undefined while worked out, null if it cannot be
+  packText: "",                            // the open pack's exact text
+  cut: null,                               // {area, keep}: the choices in Packs > Make a smaller pack
+  found: undefined,                        // the pack list, kept so the gate can re-render
+  view: { lon: 0, lat: 0, ppd: 1 },        // ppd = device pixels per degree of latitude
+  fix: null,                               // {lon, lat, accuracy} from the device GPS
+  watching: false,
+  gpsProblem: "searching",
+  reports: [],
+  lastId: null,                            // the report the UNDO button would remove
+  note: null,                              // {kind, args, undo}: what the box above the buttons says
+  panel: null,
+  areaName: "",                            // the upazila the Area sheet is about
+  deleteAllArmed: false,
+  theme: "light",
+  lang: "en",
+  link: "checking",                        // offline | nolink | online | checking
+  lens: false,                             // the radar before/after view
+  split: 0.5,                              // where the before/after line sits, 0..1 of the width
+  layers: { photo: true, terrain: true, flood: true, wet: true, roads: true, waterways: true,
+            places: true, shelters: true, admin: true, reports: true },
+  here: "",
+};
+
+const S = () => STRINGS[state.lang];
+/* Bangla numerals for everything a person reads as a number; coordinates stay as GPS writes them. */
+const num = (value) => (state.lang === "bn" ? String(value).replace(/[0-9]/g, (d) => BN_DIGITS[d]) : String(value));
+/* Counts with a thousands separator: 1,159 / ১,১৫৯. */
+const count = (value) => num(Number(value).toLocaleString("en-US"));
+/* A modelled figure, to two significant figures: "about 13,000", never a false "13,419". */
+const about = (value) => count(Number(Number(value).toPrecision(2)));
+const wide = () => Boolean(globalThis.matchMedia?.("(min-width: 900px)").matches);
+
+function fmtDate(iso) {
+  const [y, m, d] = String(iso || "").split("-").map(Number);
+  if (!y || !m || !d) return String(iso || "");
+  return num(`${d} ${MONTHS[state.lang][m - 1]} ${y}`);
+}
+
+/* The pass time, in Bangladesh time: the moment the satellite was overhead is something a person
+   can picture ("18:04, early evening"), a UTC stamp is not. */
+function passClock(utc) {
+  const [h, m] = String(utc || "").split(":").map(Number);
+  if (!Number.isFinite(h) || !Number.isFinite(m)) return "";
+  return num(S().clock((h + 6) % 24, String(m).padStart(2, "0")));
+}
+
+function kmText(metres) {
+  return metres < 1000 ? S().m(num(Math.round(metres)))
+    : S().km(num((metres / 1000).toFixed(1).replace(/\.0$/, "")));
+}
+
+function nameIn(item) {
+  if (!item) return "";
+  return state.lang === "bn" ? item.name_bn || item.name || "" : item.name || item.name_bn || "";
+}
+
+function areaName(english) {
+  const area = (state.pack?.areas || []).find((candidate) => candidate.name === english);
+  return area ? nameIn({ name: area.name, name_bn: area.name_bn }) : english;
+}
+
+function adminNames() {
+  const admin = state.pack?.admin || {};
+  const bn = state.lang === "bn";
+  return {
+    district: (bn ? admin.district_bn : admin.district) || admin.district || state.pack?.observation?.aoi_name || "",
+    division: (bn ? admin.division_bn : admin.division) || admin.division || "",
+  };
+}
+
+/* ------------------------------------------------------------------ storage */
+
+/* Reports live in localStorage: small, synchronous, and still there after the phone is restarted
+   in a boat with no signal. Every read and write is guarded, because private-mode browsers throw
+   instead of returning null. */
+function loadReports() {
+  try {
+    state.reports = JSON.parse(localStorage.getItem(REPORTS_KEY) || "[]");
+  } catch (error) {
+    state.reports = [];
+  }
+  state.reports.forEach((report, index) => {
+    if (!report.id) report.id = `r${Date.parse(report.at) || 0}-${index}`;
+  });
+}
+
+function saveReports() {
+  try {
+    localStorage.setItem(REPORTS_KEY, JSON.stringify(state.reports));
+    return true;
+  } catch (error) {
+    return false;              // the map still shows them, and the operator is told they are unsaved
+  }
+}
+
+function remembered(key) {
+  try {
+    return localStorage.getItem(key);
+  } catch (error) {
+    return null;
+  }
+}
+
+function remember(key, value) {
+  try {
+    localStorage.setItem(key, value);
+  } catch (error) { /* the choice just won't survive a reload */ }
+}
+
+/* The pack is megabytes, too big for localStorage, so it goes into Cache Storage as a Response.
+   That survives going offline, closing the browser and restarting the device. */
+async function cachePack(text) {
+  if (!("caches" in globalThis)) return false;
+  try {
+    const cache = await caches.open(PACK_CACHE);
+    await cache.put(PACK_KEY, new Response(text, { headers: { "Content-Type": "application/json" } }));
+    return true;
+  } catch (error) {
+    return false;
+  }
+}
+
+/* The pack's fingerprint, as packs/index.json records it: the first 8 hex characters of the SHA-256
+   of the file's exact bytes, grouped 4-4 (e.g. CF29-FDAD). Short enough to read aloud, so two teams
+   can check they hold the same map. The text's UTF-8 bytes are the file's bytes (packs are plain
+   ASCII). Where the browser has no crypto.subtle - a page opened from a local file - there is no
+   code at all, rather than one this phone did not work out. */
+async function fingerprintOf(text) {
+  try {
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+    const hex = [...new Uint8Array(digest, 0, 4)].map((b) => b.toString(16).padStart(2, "0")).join("").toUpperCase();
+    return `${hex.slice(0, 4)}-${hex.slice(4)}`;
+  } catch (error) {
+    return null;
+  }
+}
+
+async function cachedPack() {
+  if (!("caches" in globalThis)) return null;
+  try {
+    const cache = await caches.open(PACK_CACHE);
+    const hit = await cache.match(PACK_KEY);
+    return hit ? await hit.text() : null;
+  } catch (error) {
+    return null;
+  }
+}
+
+/* ------------------------------------------------------------------ connectivity */
+
+/*
+  The status line must tell the truth about connectivity, and navigator.onLine cannot: it only
+  knows whether a radio is switched on. So when the radio claims a connection, we test it by
+  actually asking for something. Any HTTP answer proves the network carried a request; only a
+  thrown error or our own service worker's offline reply means the link is gone. The service
+  worker lets ?probe= requests straight through, otherwise the probe would always succeed.
+*/
+async function probe() {
+  if (!navigator.onLine) {
+    state.link = "offline";
+    status();
+    return;
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
+  try {
+    const response = await fetch(`${location.pathname}?probe=${Date.now()}`,
+                                 { cache: "no-store", signal: controller.signal });
+    state.link = response.headers.get("X-Ingito-Offline") ? "nolink" : "online";
+  } catch (error) {
+    state.link = "nolink";
+  } finally {
+    clearTimeout(timer);
+  }
+  status();
+}
+
+/* ------------------------------------------------------------------ projection */
+
+/* Equirectangular, with longitude squeezed by cos(latitude) so shapes are not stretched. Over one
+   district the error is far below anything that matters in the field, and it costs no library. */
+function project(lon, lat) {
+  const { lon: clon, lat: clat, ppd } = state.view;
+  const squeeze = Math.cos((clat * Math.PI) / 180);
+  return [canvas.width / 2 + (lon - clon) * ppd * squeeze,
+          canvas.height / 2 - (lat - clat) * ppd];
+}
+
+function unproject(x, y) {
+  const { lon: clon, lat: clat, ppd } = state.view;
+  const squeeze = Math.cos((clat * Math.PI) / 180);
+  return [clon + (x - canvas.width / 2) / (ppd * squeeze),
+          clat - (y - canvas.height / 2) / ppd];
+}
+
+/* The view that shows a whole box, with a margin. */
+function viewFor([west, south, east, north], margin = 0.9) {
+  const squeeze = Math.cos((((south + north) / 2) * Math.PI) / 180);
+  const fitLat = canvas.height / Math.max(north - south, 1e-6);
+  const fitLon = canvas.width / Math.max((east - west) * squeeze, 1e-6);
+  return { lon: (west + east) / 2, lat: (south + north) / 2, ppd: Math.min(fitLat, fitLon) * margin };
+}
+
+/* The view that shows about `metres` across the shorter side of the map, centred on a point. */
+function viewAt(lon, lat, metres) {
+  return { lon, lat, ppd: (Math.min(canvas.width, canvas.height) * 110540) / metres };
+}
+
+/*
+  Open ON the water. The first thing anyone sees - a responder or a judge - should be the biggest
+  body of water the radar found, with the reticle on it, so the card's first answer is "Radar
+  saw water here". The crosshair point is the grid point nearest the patch's middle that is
+  actually inside it (a bent patch's middle can be dry land). No flood, or no inside point: show
+  the whole pack instead.
+*/
+const OPEN_SPAN_M = 6000;           // across the shorter side of the map
+
+function openOnWater(pack) {
+  // Biggest first, and only water inside the pack's own upazilas: a pack cut to one upazila also
+  // holds patches just over its edge, and must not open on one of those.
+  const features = [...(pack.observation.features || [])].sort((a, b) => b.km2 - a.km2);
+  for (const feature of features) {
+    const ring = feature.rings[0];
+    const [west, south, east, north] = boxOf([ring]);
+    let best = null;
+    for (let i = 1; i < 20; i++) {
+      for (let j = 1; j < 20; j++) {
+        const lon = west + ((east - west) * i) / 20;
+        const lat = south + ((north - south) * j) / 20;
+        const off = (i - 10) ** 2 + (j - 10) ** 2;
+        if ((!best || off < best.off) && inRing(ring, lon, lat)) best = { lon, lat, off };
+      }
+    }
+    if (best && areaAt([best.lon, best.lat])) {
+      state.view = viewAt(best.lon, best.lat, OPEN_SPAN_M);
+      return;
+    }
+  }
+  state.view = viewFor(pack.coverage.bbox, 0.94);       // no flood, or none inside: the whole pack
+}
+
+/* Zoom about a point on screen (device pixels), so the ground under a pinch or cursor stays put. */
+function zoomAt(factor, x = canvas.width / 2, y = canvas.height / 2) {
+  const before = unproject(x, y);
+  state.view.ppd = Math.min(Math.max(state.view.ppd * factor, 200), 400000);
+  const after = unproject(x, y);
+  state.view.lon += before[0] - after[0];
+  state.view.lat += before[1] - after[1];
+}
+
+function metresPerScreenPixel() {
+  return (110540 * (globalThis.devicePixelRatio || 1)) / state.view.ppd;
+}
+
+function metresPerDegree(lat) {
+  return 111320 * Math.cos((lat * Math.PI) / 180);
+}
+
+function distanceM(a, b) {
+  const dx = (a[0] - b[0]) * metresPerDegree((a[1] + b[1]) / 2);
+  const dy = (a[1] - b[1]) * 110540;
+  return Math.hypot(dx, dy);
+}
+
+function bearingIndex(from, to) {
+  const dx = (to[0] - from[0]) * metresPerDegree(from[1]);
+  const dy = (to[1] - from[1]) * 110540;
+  const angle = (Math.atan2(dx, dy) * 180) / Math.PI;
+  return Math.round(((angle + 360) % 360) / 45) % 8;
+}
+
+/* Ray casting: is this point inside this ring. */
+function inRing(ring, lon, lat) {
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const [xi, yi] = ring[i];
+    const [xj, yj] = ring[j];
+    if ((yi > lat) !== (yj > lat) && lon < ((xj - xi) * (lat - yi)) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
+
+function boxOf(rings) {
+  const box = [Infinity, Infinity, -Infinity, -Infinity];
+  for (const ring of rings) {
+    for (const [lon, lat] of ring) {
+      if (lon < box[0]) box[0] = lon;
+      if (lat < box[1]) box[1] = lat;
+      if (lon > box[2]) box[2] = lon;
+      if (lat > box[3]) box[3] = lat;
+    }
+  }
+  return box;
+}
+
+const inBox = (box, lon, lat) => lon >= box[0] && lon <= box[2] && lat >= box[1] && lat <= box[3];
+const boxesMeet = (a, b) => a[0] <= b[2] && a[2] >= b[0] && a[1] <= b[3] && a[3] >= b[1];
+
+/* A pack can be a file handed over by another team, so every string from it is escaped before it
+   goes into the page. A pack must never be able to run code on the operator's phone. */
+function esc(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+}
+
+function ageInDays(iso) {
+  const then = Date.parse(`${iso}T00:00:00Z`);
+  return Number.isFinite(then) ? Math.round((Date.now() - then) / 86400000) : null;
+}
+
+/* ------------------------------------------------------------------ what the pack says, per place */
+
+/*
+  Worked out once when a pack opens, so the card, the alerts and the area sheets all read the same
+  numbers. Nothing here is estimated: areas and shares come from the radar pipeline, counts are
+  counts of what the pack holds.
+*/
+function computeStats(pack) {
+  const features = (pack.observation.features || []).map((feature) => ({ rings: feature.rings, box: boxOf(feature.rings) }));
+  const inWater = (lon, lat) => features.some((feature) =>
+    inBox(feature.box, lon, lat) && feature.rings.some((ring) => inRing(ring, lon, lat)));
+  const shelters = pack.context.shelters || [];
+  shelters.forEach((shelter) => { shelter.wet = inWater(shelter.lon, shelter.lat); });
+  const wetRoads = (pack.context.roads || []).filter((road) => road.wet && road.coords.length);
+  const byUpazila = pack.observation.by_upazila || [];
+  const people = pack.population?.by_upazila || [];
+
+  const areas = (pack.areas || []).map((area) => {
+    const box = boxOf(area.rings);
+    const inside = (lon, lat) => inBox(box, lon, lat) && area.rings.some((ring) => inRing(ring, lon, lat));
+    const ring = area.rings.reduce((a, b) => (b.length > a.length ? b : a), []);
+    const label = [ring.reduce((s, v) => s + v[0], 0) / ring.length, ring.reduce((s, v) => s + v[1], 0) / ring.length];
+    const here = shelters.filter((shelter) => inside(shelter.lon, shelter.lat));
+    const kinds = {};
+    here.forEach((shelter) => { kinds[shelter.kind] = (kinds[shelter.kind] || 0) + 1; });
+    const figures = byUpazila.find((row) => row.name === area.name);
+    return {
+      name: area.name, name_bn: area.name_bn, km2: area.km2, rings: area.rings, box, label,
+      flood_km2: figures ? figures.flood_km2 : null, share: figures ? figures.share_pct : null,
+      people: people.find((row) => row.name === area.name)?.people_in_water ?? null,
+      shelters: here.length, kinds, sheltersWet: here.filter((shelter) => shelter.wet).length,
+      wetRoads: wetRoads.filter((road) => {
+        const [lon, lat] = road.coords[Math.floor(road.coords.length / 2)];
+        return inside(lon, lat);
+      }).length,
+      places: (pack.context.places || []).filter((place) => inside(place.lon, place.lat)).length,
+      features: features.filter((feature) => boxesMeet(feature.box, box)),
+      inside,
+    };
+  });
+  const ranked = areas.filter((area) => area.share !== null).sort((a, b) => b.share - a.share);
+  return { inWater, areas, ranked, top: ranked[0]?.name || "", wetRoads: wetRoads.length,
+           byName: Object.fromEntries(areas.map((area) => [area.name, area])) };
+}
+
+function areaAt([lon, lat]) {
+  return state.stats?.areas.find((area) => area.inside(lon, lat)) || null;
+}
+
+function nearestArea(point) {
+  let best = null;
+  for (const area of state.stats?.areas || []) {
+    const metres = distanceM(point, area.label);
+    if (!best || metres < best.metres) best = { area, metres };
+  }
+  return best?.area || null;
+}
+
+const areaLabel = (area) => nameIn({ name: area.name, name_bn: area.name_bn });
+
+/* A GPS fix counts only inside the pack's box. A phone far from the district - a team still on its
+   way, a demonstration in Dhaka - would otherwise answer every question about a place the pack
+   knows nothing of, and drop every report there. Then the reticle is the point, and the card says so. */
+function gpsHere() {
+  return Boolean(state.fix && state.pack && inBox(state.pack.coverage.bbox, state.fix.lon, state.fix.lat));
+}
+
+/* The point everything answers about: the operator's GPS position, or the reticle. */
+function aim() {
+  return gpsHere() ? [state.fix.lon, state.fix.lat] : unproject(canvas.width / 2, canvas.height / 2);
+}
+
+/* ------------------------------------------------------------------ the driest road to a shelter */
+
+/*
+  "Can I get there?" A road route from here to a shelter outside the radar's water, over the roads
+  in the pack, from the nearest road that leads to one. First only along stretches where the radar
+  saw no water; only if that reaches no shelter, the route with the least water, and the card says
+  every route from that road crosses it. What it cannot
+  know: roads that are not in the pack (lanes, footpaths) and water the radar missed. So a dry route
+  can still be blocked, and the card says that too.
+*/
+
+/* Metres from a point to a segment, on a flat grid around the point: exact enough over a road stretch. */
+function toSegmentM(point, a, b) {
+  const kx = metresPerDegree(point[1]);
+  const [ax, ay] = [(a[0] - point[0]) * kx, (a[1] - point[1]) * 110540];
+  const [dx, dy] = [(b[0] - a[0]) * kx, (b[1] - a[1]) * 110540];
+  const t = Math.max(0, Math.min(1, -(ax * dx + ay * dy) / (dx * dx + dy * dy || 1)));
+  return Math.hypot(ax + t * dx, ay + t * dy);
+}
+
+/* Metres of radar water on each stretch of a road (between two of its points). Each piece of a wet
+   part lies along one stretch of the road it was cut from. A pack older than wet_parts counts the
+   whole road as wet, as its map does. */
+function wetStretches(road) {
+  const coords = road.coords;
+  const wet = coords.slice(1).map(() => 0);
+  if (!road.wet) return wet;
+  if (!road.wet_parts) return wet.map((_, i) => distanceM(coords[i], coords[i + 1]));
+  for (const part of road.wet_parts) {
+    for (let j = 1; j < part.length; j++) {
+      const middle = [(part[j - 1][0] + part[j][0]) / 2, (part[j - 1][1] + part[j][1]) / 2];
+      let best = { i: 0, m: Infinity };
+      for (let i = 0; i < wet.length; i++) {
+        const m = toSegmentM(middle, coords[i], coords[i + 1]);
+        if (m < best.m) best = { i, m };
+      }
+      wet[best.i] += distanceM(part[j - 1], part[j]);
+    }
+  }
+  return wet;
+}
+
+/* Lanes travel packed: the first point in whole 1e-5 degrees, then each step from the one before. */
+function unpackLine(line) {
+  const coords = [];
+  for (let i = 0, x = 0, y = 0; i < line.length; i += 2) {
+    x += line[i];
+    y += line[i + 1];
+    coords.push([x / 1e5, y / 1e5]);
+  }
+  return coords;
+}
+
+/* The pack's roads and lanes as a network. Roads meet where they share a point, as in
+   OpenStreetMap, so every point is a node. Points are filed in cells of about 1.2 km - wider than
+   ROUTE_REACH_M - so the points near a place are found in the 3 x 3 cells around it, not among
+   all hundred thousand. Keys are numbers, not strings: half the time on a slow phone. */
+const CELL = 0.0125;
+function roadNetwork(pack) {
+  const ids = new Map();
+  const nodes = [];
+  const links = [];                                // per node: [{to, m, wet}]
+  const cells = new Map();
+  const cellOf = ([lon, lat]) => [Math.floor(lon / CELL), Math.floor(lat / CELL)];
+  const cellKey = (x, y) => x * 100000 + y;
+  const node = (point) => {
+    const key = Math.round(point[0] * 1e5) * 1e8 + Math.round(point[1] * 1e5);
+    let id = ids.get(key);
+    if (id === undefined) {
+      id = nodes.length;
+      const cell = cellKey(...cellOf(point));
+      if (!cells.has(cell)) cells.set(cell, []);
+      cells.get(cell).push(id);
+      ids.set(key, id);
+      nodes.push(point);
+      links.push([]);
+    }
+    return id;
+  };
+  for (const road of [...(pack.context.roads || []), ...(pack.context.lanes || [])]) {
+    const wet = wetStretches(road);
+    for (let i = 1; i < road.coords.length; i++) {
+      const [a, b] = [node(road.coords[i - 1]), node(road.coords[i])];
+      if (a === b) continue;
+      const m = distanceM(road.coords[i - 1], road.coords[i]);
+      links[a].push({ to: b, m, wet: wet[i - 1] });
+      links[b].push({ to: a, m, wet: wet[i - 1] });
+    }
+  }
+  // Which piece of the network each point is on. A road that joins nothing - its link road is not in
+  // the pack - leads to no shelter, so a route starts from the nearest road that does.
+  const piece = new Int32Array(nodes.length).fill(-1);
+  for (let first = 0, id = 0; first < nodes.length; first++, id++) {
+    if (piece[first] !== -1) continue;
+    const stack = [first];
+    piece[first] = id;
+    while (stack.length) {
+      for (const link of links[stack.pop()]) {
+        if (piece[link.to] === -1) {
+          piece[link.to] = id;
+          stack.push(link.to);
+        }
+      }
+    }
+  }
+  const around = (point) => {
+    const [cx, cy] = cellOf(point);
+    const near = [];
+    for (let x = cx - 1; x <= cx + 1; x++) {
+      for (let y = cy - 1; y <= cy + 1; y++) near.push(...(cells.get(cellKey(x, y)) || []));
+    }
+    return near;
+  };
+  const nearest = (point, usable = () => true) => {
+    let best = null;
+    for (const id of around(point)) {
+      const m = distanceM(point, nodes[id]);
+      if (m <= ROUTE_REACH_M && (!best || m < best.m) && usable(id)) best = { id, m };
+    }
+    return best;
+  };
+  // Where a route may end: shelters outside the radar's water, each at its nearest road point.
+  const ends = new Map();
+  const served = new Set();
+  for (const shelter of pack.context.shelters || []) {
+    const at = !shelter.wet && nearest([shelter.lon, shelter.lat]);
+    if (!at) continue;
+    if (!ends.has(at.id)) ends.set(at.id, []);
+    ends.get(at.id).push({ shelter, m: at.m });
+    served.add(piece[at.id]);
+  }
+  return { nodes, links, ends, around, nearest, start: (point) => nearest(point, (id) => served.has(piece[id])) };
+}
+
+/* The stretches road-cut reports close: for each, the one stretch of road it sits on, both ways.
+   Only that stretch: a person at the cut can still go back the way they came. Someone who saw the
+   road cut knows more than the radar did, so no route is sent through it. */
+function closedLinks(network) {
+  const closed = new Set();
+  for (const report of state.reports) {
+    if (report.type !== "road_cut") continue;
+    const point = [report.lon, report.lat];
+    let best = null;
+    for (const id of network.around(point)) {
+      for (const link of network.links[id]) {
+        const m = toSegmentM(point, network.nodes[id], network.nodes[link.to]);
+        if (m <= CUT_NEAR_M && (!best || m < best.m)) best = { id, link, m };
+      }
+    }
+    if (!best) continue;
+    closed.add(best.link);
+    for (const back of network.links[best.link.to]) if (back.to === best.id) closed.add(back);
+  }
+  return closed;
+}
+
+/* A binary min-heap of [cost, node]: the whole of the priority queue the search needs. */
+function heapPush(heap, item) {
+  let i = heap.push(item) - 1;
+  while (i > 0 && heap[(i - 1) >> 1][0] > item[0]) {
+    heap[i] = heap[(i - 1) >> 1];
+    i = (i - 1) >> 1;
+  }
+  heap[i] = item;
+}
+
+function heapPop(heap) {
+  const top = heap[0];
+  const last = heap.pop();
+  if (heap.length) {
+    let i = 0;
+    for (let child = 1; child < heap.length; child = 2 * i + 1) {
+      if (child + 1 < heap.length && heap[child + 1][0] < heap[child][0]) child++;
+      if (heap[child][0] >= last[0]) break;
+      heap[i] = heap[child];
+      i = child;
+    }
+    heap[i] = last;
+  }
+  return top;
+}
+
+/* Dijkstra outward from the start until no shelter can be nearer than the nearest one reached.
+   `cost` prices a link; Infinity closes it. Returns the shelter and how each point was reached. */
+function nearestShelter(network, start, cost) {
+  const best = new Float64Array(network.nodes.length).fill(Infinity);
+  const via = [];                                  // how each point was reached: {from, link}
+  let pick = null;
+  best[start.id] = 0;
+  const heap = [[0, start.id]];
+  while (heap.length) {
+    const [spent, at] = heapPop(heap);
+    if (pick && spent >= pick.total) break;
+    if (spent > best[at]) continue;
+    for (const end of network.ends.get(at) || []) {
+      if (!pick || spent + end.m < pick.total) pick = { ...end, at, total: spent + end.m };
+    }
+    for (const link of network.links[at]) {
+      const next = spent + cost(link);
+      if (next < best[link.to]) {
+        best[link.to] = next;
+        via[link.to] = { from: at, link };
+        heapPush(heap, [next, link.to]);
+      }
+    }
+  }
+  return pick && { ...pick, via };
+}
+
+function findRoute(from) {
+  const network = state.network || (state.network = roadNetwork(state.pack));
+  const start = network.start(from);
+  if (!start) return { from, none: network.nearest(from) ? "link" : "road" };
+  const closed = closedLinks(network);
+  const open = (cost) => (link) => (closed.has(link) ? Infinity : cost(link));
+  // Only stretches where the radar saw no water; failing that, the least water.
+  const dry = nearestShelter(network, start, open((link) => (link.wet > 0 ? Infinity : link.m)));
+  const found = dry || nearestShelter(network, start, open((link) => link.m + WATER_PENALTY * link.wet));
+  if (!found) return { from, none: "cut" };
+  // Walk back from the shelter's road point. The two ends off the road count in the distance;
+  // radar water on them does not, because no road is known there to measure it along.
+  const path = [network.nodes[found.at]];
+  const wetSteps = [];                             // stretches with radar water, drawn red on the route
+  let metres = start.m + found.m;
+  let wet = 0;
+  for (let at = found.at; at !== start.id; at = found.via[at].from) {
+    const { from: back, link } = found.via[at];
+    metres += link.m;
+    wet += link.wet;
+    if (link.wet > 0) wetSteps.push([network.nodes[back], network.nodes[at]]);
+    path.push(network.nodes[back]);
+  }
+  return { from, path: path.reverse(), wetSteps, shelter: found.shelter, metres, wet,
+           dry: Boolean(dry), cuts: closed.size > 0 };
+}
+
+/* What the card says about the route: its length, and whether it meets radar water. */
+function routeWords(route) {
+  const text = S();
+  if (route.none === "road") return `${esc(text.routeNoRoad(kmText(ROUTE_REACH_M)))}<small>${text.routeClear}</small>`;
+  if (route.none) return `${esc(route.none === "cut" ? text.routeCut : text.routeNoLink)}<small>${text.routeClear}</small>`;
+  const kind = text.kinds[route.shelter.kind] || route.shelter.kind;
+  const cuts = route.cuts ? text.routeCutsOut : "";
+  return route.dry
+    ? `${esc(text.routeDry(kmText(route.metres), kind, nameIn(route.shelter)))}<small>${cuts}${text.routeDryNote}</small>`
+    : `${esc(text.routeWet(kmText(route.metres), kmText(route.wet)))}` +
+      `<small>${cuts}${esc(text.routeWetNote(kind, nameIn(route.shelter)))}</small>`;
+}
+
+/* The view that shows a whole route around its start: the start stays in the middle, so the card
+   stays about the point the route is from, and the map zooms out - never in - until every point
+   clears the search bar and chips over the top of the map. */
+function routeView(route) {
+  const ratio = globalThis.devicePixelRatio || 1;
+  const covered = Math.max(0, el("top").getBoundingClientRect().bottom - canvas.getBoundingClientRect().top) * ratio;
+  const room = { x: 0.9 * canvas.width / 2, up: canvas.height / 2 - covered - 12 * ratio, down: 0.85 * canvas.height / 2 };
+  const [lon0, lat0] = route.from;
+  const squeeze = Math.cos((lat0 * Math.PI) / 180);
+  let ppd = state.view.ppd;
+  for (const [lon, lat] of [...route.path, [route.shelter.lon, route.shelter.lat]]) {
+    const dx = Math.abs(lon - lon0) * squeeze;
+    const dy = lat - lat0;
+    if (dx) ppd = Math.min(ppd, room.x / dx);
+    if (dy) ppd = Math.min(ppd, (dy > 0 ? Math.max(room.up, 1) : room.down) / Math.abs(dy));
+  }
+  return { lon: lon0, lat: lat0, ppd };
+}
+
+/* One tap asks for a route from the point the card is about; the next tap clears it. */
+function toggleRoute() {
+  state.route = state.route ? null : findRoute(aim());
+  if (state.route?.path) {
+    const view = routeView(state.route);
+    if (view.ppd < state.view.ppd || view.lon !== state.view.lon || view.lat !== state.view.lat) flyTo(view);
+  }
+  updateReadout();
+  draw();
+}
+
+/* ------------------------------------------------------------------ motion */
+
+/* Go to a place at once: no glide, so nothing moves that the operator did not move, and a cheap
+   phone has no frames to drop. */
+function flyTo(target) {
+  hideNote();
+  state.view = { lon: target.lon, lat: target.lat, ppd: target.ppd };
+  draw();
+  updateReadout();
+}
+
+/* ------------------------------------------------------------------ drawing */
+
+function resize() {
+  const ratio = globalThis.devicePixelRatio || 1;
+  canvas.width = Math.round(canvas.clientWidth * ratio);
+  canvas.height = Math.round(canvas.clientHeight * ratio);
+}
+
+function linePath(coords) {
+  ctx.beginPath();
+  coords.forEach(([lon, lat], i) => {
+    const [x, y] = project(lon, lat);
+    i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+  });
+}
+
+function strokeLine(coords, width, colour, dash) {
+  linePath(coords);
+  ctx.setLineDash(dash || []);
+  ctx.lineWidth = width;
+  ctx.strokeStyle = colour;
+  ctx.stroke();
+  ctx.setLineDash([]);
+}
+
+function ringPath(rings) {
+  for (const ring of rings) {
+    ring.forEach(([lon, lat], i) => {
+      const [x, y] = project(lon, lat);
+      i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+    });
+    ctx.closePath();
+  }
+}
+
+function drawPicture(image, [west, south, east, north]) {
+  if (!image || !image.complete || !image.naturalWidth) return false;
+  const [x0, y0] = project(west, north);
+  const [x1, y1] = project(east, south);
+  ctx.drawImage(image, x0, y0, x1 - x0, y1 - y0);
+  return true;
+}
+
+/* The flood hatch: fine diagonal lines, the cartographer's sign for "measured, not drawn". The
+   pattern is pinned to the ground, so it moves with the map instead of shimmering over it. */
+let hatchCache = null;
+function hatchPattern(ratio) {
+  if (!hatchCache || hatchCache.ratio !== ratio) {
+    const size = Math.max(4, Math.round(7 * ratio));
+    const tile = document.createElement("canvas");
+    tile.width = tile.height = size;
+    const g = tile.getContext("2d");
+    g.strokeStyle = MAP.floodHatch;
+    g.lineWidth = 1.1 * ratio;
+    g.beginPath();
+    g.moveTo(-1, size + 1); g.lineTo(size + 1, -1);
+    g.moveTo(-1, 1); g.lineTo(1, -1);
+    g.moveTo(size - 1, size + 1); g.lineTo(size + 1, size - 1);
+    g.stroke();
+    hatchCache = { ratio, size, pattern: ctx.createPattern(tile, "repeat") };
+  }
+  const [ox, oy] = project(state.pack.coverage.bbox[0], state.pack.coverage.bbox[3]);
+  if (hatchCache.pattern.setTransform) {
+    hatchCache.pattern.setTransform(new DOMMatrix().translate(ox % hatchCache.size, oy % hatchCache.size));
+  }
+  return hatchCache.pattern;
+}
+
+const ROAD_WIDTH = { motorway: 4, trunk: 3.6, primary: 3.1, secondary: 2.5, tertiary: 2,
+                     unclassified: 1.2 };
+
+function draw() {
+  const ratio = globalThis.devicePixelRatio || 1;
+  if (canvas.width !== Math.round(canvas.clientWidth * ratio) ||
+      canvas.height !== Math.round(canvas.clientHeight * ratio)) resize();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalAlpha = 1;
+  ctx.globalCompositeOperation = "source-over";
+  ctx.fillStyle = MAP.ground;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  if (!state.pack) return;
+  const pack = state.pack;
+  const mpp = metresPerScreenPixel();
+  const detailed = mpp < SHOW_MINOR_BELOW;
+  const lineScale = detailed ? 1 : 0.6;
+  const imagery = pack.imagery;
+  const splitX = state.split * canvas.width;
+  const lens = state.lens && imagery?.radar;
+  ctx.lineJoin = "round";
+  ctx.lineCap = "round";
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+
+  // EARTH. In the radar view: the two passes, before on the left of the line, flood day on the
+  // right, tinted cool so they read as instrument data. Otherwise: the photograph and its relief.
+  if (lens) {
+    drawPicture(state.images.during, imagery.bounds);
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, 0, splitX, canvas.height);
+    ctx.clip();
+    drawPicture(state.images.before, imagery.bounds);
+    ctx.restore();
+    ctx.globalCompositeOperation = "multiply";
+    ctx.fillStyle = MAP.radarTint;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.globalCompositeOperation = "source-over";
+  } else {
+    if (state.layers.photo && imagery) drawPicture(state.images.optical, imagery.bounds);
+    if (state.layers.terrain && state.images.terrain) {
+      ctx.globalCompositeOperation = "soft-light";
+      ctx.globalAlpha = state.layers.photo && imagery ? 0.55 : 0.9;
+      drawPicture(state.images.terrain, pack.terrain.bounds);
+      ctx.globalAlpha = 1;
+      ctx.globalCompositeOperation = "source-over";
+    }
+  }
+
+  // The piece of Earth this pack is about stays bright; everything outside it is dimmed.
+  ctx.beginPath();
+  ctx.rect(0, 0, canvas.width, canvas.height);
+  for (const area of pack.areas || []) ringPath(area.rings);
+  ctx.fillStyle = MAP.veil;
+  ctx.fill("evenodd");
+
+  drawGraticule(ratio);
+
+  // Upazila boundaries: white dashes on a dark underline, readable on any ground.
+  if (state.layers.admin) {
+    for (const area of pack.areas || []) {
+      ctx.beginPath();
+      ringPath(area.rings);
+      ctx.lineWidth = 2.6 * ratio;
+      ctx.strokeStyle = MAP.adminUnder;
+      ctx.stroke();
+      ctx.setLineDash([6 * ratio, 5 * ratio]);
+      ctx.lineWidth = 1.2 * ratio;
+      ctx.strokeStyle = MAP.admin;
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+  }
+
+  if (!lens && state.layers.waterways) {
+    for (const way of pack.context.waterways || []) {
+      if (!detailed && MINOR_WATER.has(way.kind)) continue;
+      const width = way.kind === "river" ? 2.6 : way.kind === "canal" ? 1.7 : 1.1;
+      // Close up over the photograph the line steps back, so the river itself - its real width
+      // and bends - is what the eye follows. Far out, the line is the only way to see it.
+      strokeLine(way.coords, width * lineScale * ratio,
+                 detailed && state.layers.photo && imagery ? MAP.riverOnPhoto : MAP.river);
+    }
+  }
+
+  if (!lens && state.layers.roads) {
+    // Lanes and tracks: thirteen thousand of them, so only close up and only where the screen is.
+    if (detailed && pack.context.lanes) {
+      const view = [...unproject(0, canvas.height), ...unproject(canvas.width, 0)];
+      for (const lane of pack.context.lanes) {
+        if (boxesMeet(lane.box, view)) strokeLine(lane.coords, 0.9 * ratio, MAP.roadMinor);
+      }
+    }
+    for (const casing of [true, false]) {
+      for (const road of pack.context.roads || []) {
+        const minor = MINOR_ROADS.has(road.kind);
+        if (minor && !detailed) continue;
+        const width = (ROAD_WIDTH[road.kind] || 1.2) * lineScale * ratio;
+        if (minor) {
+          if (!casing) strokeLine(road.coords, width, MAP.roadMinor);
+        } else {
+          strokeLine(road.coords, casing ? width + 2 * ratio : width, casing ? MAP.roadCasing : MAP.road);
+        }
+      }
+    }
+  }
+
+  // SIGNAL: the radar's water, the only bright teal on the map. In the radar view only its edge is
+  // drawn, and only over the flood-day pass it was measured from.
+  if (state.layers.flood) {
+    const rings = (pack.observation.features || []).flatMap((feature) => feature.rings);
+    if (lens) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(splitX, 0, canvas.width - splitX, canvas.height);
+      ctx.clip();
+      ctx.beginPath();
+      ringPath(rings);
+      ctx.lineWidth = 1.6 * ratio;
+      ctx.strokeStyle = MAP.radarEdge;
+      ctx.stroke();
+      ctx.restore();
+    } else {
+      ctx.beginPath();
+      ringPath(rings);
+      if (mpp < HATCH_FLOOD_BELOW) {
+        // Close up, the land goes under water: a silty wash MULTIPLIED into the photograph, so
+        // the fields and village trees still show through it, the way they show through shallow
+        // floodwater. Then the hatch and the edge: the sign that this was measured from orbit.
+        if (state.layers.photo && imagery) {
+          ctx.globalCompositeOperation = "multiply";
+          ctx.fillStyle = MAP.floodWash;
+          ctx.fill();
+          ctx.globalCompositeOperation = "source-over";
+        } else {
+          ctx.fillStyle = MAP.flood;
+          ctx.fill();
+        }
+        ctx.fillStyle = hatchPattern(ratio);
+        ctx.fill();
+        ctx.lineWidth = 1.4 * ratio;
+      } else {
+        // Far out most patches are a pixel or two: solid, or the layer the instrument exists to
+        // carry would vanish. The edge guarantees even the smallest patch two pixels.
+        ctx.fillStyle = MAP.floodFar;
+        ctx.fill();
+        ctx.lineWidth = 1 * ratio;
+      }
+      ctx.strokeStyle = MAP.floodEdge;
+      ctx.stroke();
+    }
+  }
+
+  // INSIGHT: the road route the operator asked for, under the red wet stretches, so radar water on
+  // the route still shows on it.
+  if (!lens && state.route?.path) drawRoute(ratio);
+
+  // INSIGHT: roads through radar water. Worked out from the signal, and a reason to pay attention,
+  // so red - as dashes, so the shape says "interrupted" even without the colour.
+  if (!lens && state.layers.wet) {
+    for (const road of pack.context.roads || []) {
+      if (!road.wet) continue;
+      const width = (ROAD_WIDTH[road.kind] || 1.2) * lineScale * ratio;
+      // Only the stretch inside radar water. A pack built before wet_parts existed marks the
+      // whole road, as it always did.
+      for (const part of road.wet_parts || [road.coords]) {
+        strokeLine(part, width + 4 * ratio, MAP.wetCasing);
+        strokeLine(part, Math.max(1.6 * ratio, width), MAP.wetDash, [5 * ratio, 4 * ratio]);
+      }
+    }
+  }
+
+  if (!lens && state.layers.shelters) {
+    const near = mpp <= 40;
+    const size = (near ? 13 : 6) * ratio;
+    for (const shelter of pack.context.shelters || []) {
+      const [x, y] = project(shelter.lon, shelter.lat);
+      if (x < -20 || y < -20 || x > canvas.width + 20 || y > canvas.height + 20) continue;
+      drawShelter(x, y, size, near, ratio);
+    }
+  }
+
+  drawLabels(ratio, mpp, lens);
+
+  // ACTION, last, so nothing can cover it. Circle = water here, triangle = road cut.
+  if (state.layers.reports) {
+    for (const report of state.reports) drawReport(report, ratio);
+  }
+  if (state.fix) drawFix(ratio);
+  if (lens) drawDivider(ratio, splitX);
+  drawScale(ratio);
+}
+
+function drawShelter(x, y, size, near, ratio) {
+  const half = size / 2;
+  ctx.beginPath();
+  if (ctx.roundRect) ctx.roundRect(x - half, y - half, size, size, 3 * ratio);
+  else ctx.rect(x - half, y - half, size, size);
+  ctx.fillStyle = MAP.shelter;
+  ctx.fill();
+  ctx.lineWidth = (near ? 1.6 : 1) * ratio;
+  ctx.strokeStyle = MAP.shelterEdge;
+  ctx.stroke();
+  if (near) {                              // a roof: the shape says "shelter" without the colour
+    ctx.beginPath();
+    ctx.moveTo(x - half * 0.55, y + half * 0.1);
+    ctx.lineTo(x, y - half * 0.45);
+    ctx.lineTo(x + half * 0.55, y + half * 0.1);
+    ctx.moveTo(x - half * 0.32, y + half * 0.05);
+    ctx.lineTo(x - half * 0.32, y + half * 0.5);
+    ctx.lineTo(x + half * 0.32, y + half * 0.5);
+    ctx.lineTo(x + half * 0.32, y + half * 0.05);
+    ctx.lineWidth = 1.5 * ratio;
+    ctx.strokeStyle = "#ffffff";
+    ctx.stroke();
+  }
+}
+
+/* The route: shelter green under a white halo, which holds on green fields and on the dark ground.
+   The two ends off the road are dotted - no road is known there - and where it starts is a hollow
+   ring, never filled, so it cannot be taken for a report or for the operator. */
+function drawRoute(ratio) {
+  const { from, path, shelter } = state.route;
+  const dots = [0.1, 12 * ratio];
+  for (const [coords, dash] of [[path], [[from, path[0]], dots], [[path[path.length - 1], [shelter.lon, shelter.lat]], dots]]) {
+    strokeLine(coords, 9 * ratio, MAP.routeHalo, dash);
+    strokeLine(coords, 5 * ratio, MAP.route, dash);
+  }
+  // Radar water on the route, in the wet-road red, whether it lies on a road or on a lane.
+  for (const step of state.route.wetSteps || []) {
+    strokeLine(step, 9 * ratio, MAP.wetCasing);
+    strokeLine(step, 3 * ratio, MAP.wetDash, [5 * ratio, 4 * ratio]);
+  }
+  const [x, y] = project(from[0], from[1]);
+  ctx.beginPath();
+  ctx.arc(x, y, 6.5 * ratio, 0, Math.PI * 2);
+  ctx.fillStyle = MAP.routeHalo;
+  ctx.fill();
+  ctx.lineWidth = 3.5 * ratio;
+  ctx.strokeStyle = MAP.route;
+  ctx.stroke();
+}
+
+function drawReport(report, ratio) {
+  const [x, y] = project(report.lon, report.lat);
+  const s = 10.5 * ratio;
+  ctx.beginPath();
+  if (report.type === "water_here") {
+    ctx.arc(x, y, s, 0, Math.PI * 2);
+  } else {
+    ctx.moveTo(x, y - s * 1.25);
+    ctx.lineTo(x + s * 1.15, y + s * 0.8);
+    ctx.lineTo(x - s * 1.15, y + s * 0.8);
+    ctx.closePath();
+  }
+  // A report received by text message is drawn hollow: same shape, but plainly not this phone's own.
+  const received = report.via === "sms";
+  ctx.fillStyle = received ? MAP.reportEdge : MAP.report;
+  ctx.fill();
+  ctx.lineWidth = 2.4 * ratio;
+  ctx.strokeStyle = received ? MAP.report : MAP.reportEdge;
+  ctx.stroke();
+  ctx.beginPath();                         // the glyph: a wave, or a broken road
+  if (report.type === "water_here") {
+    ctx.moveTo(x - s * 0.58, y);
+    ctx.quadraticCurveTo(x - s * 0.29, y - s * 0.38, x, y);
+    ctx.quadraticCurveTo(x + s * 0.29, y + s * 0.38, x + s * 0.58, y);
+  } else {
+    ctx.moveTo(x - s * 0.6, y + s * 0.2);
+    ctx.lineTo(x - s * 0.15, y + s * 0.2);
+    ctx.moveTo(x + s * 0.15, y + s * 0.2);
+    ctx.lineTo(x + s * 0.6, y + s * 0.2);
+  }
+  ctx.lineWidth = 1.9 * ratio;
+  ctx.strokeStyle = received ? MAP.report : "#ffffff";
+  ctx.stroke();
+}
+
+/* The operator: a river-deep dot with a cream core inside a white ring, and the GPS accuracy as a
+   faint circle. Never red and never filled solid, so it cannot be mistaken for a report. */
+function drawFix(ratio) {
+  const [x, y] = project(state.fix.lon, state.fix.lat);
+  if (state.fix.accuracy) {
+    ctx.beginPath();
+    ctx.arc(x, y, (state.fix.accuracy / 110540) * state.view.ppd, 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(234, 230, 217, 0.12)";
+    ctx.fill();
+    ctx.lineWidth = 1.2 * ratio;
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.75)";
+    ctx.stroke();
+  }
+  ctx.beginPath();
+  ctx.arc(x, y, 10 * ratio, 0, Math.PI * 2);
+  ctx.fillStyle = MAP.you;
+  ctx.fill();
+  ctx.lineWidth = 3 * ratio;
+  ctx.strokeStyle = MAP.youRing;
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(x, y, 4 * ratio, 0, Math.PI * 2);
+  ctx.fillStyle = MAP.youCore;
+  ctx.fill();
+}
+
+/* The before/after line: a white rule with a handle. It is drawn on the map because it is part of
+   the map - the boundary between two moments in time. */
+function drawDivider(ratio, splitX) {
+  const handleY = canvas.height * 0.62;
+  ctx.fillStyle = "rgba(0, 0, 0, 0.5)";
+  ctx.fillRect(splitX - 2 * ratio, 0, 4 * ratio, canvas.height);
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(splitX - 1 * ratio, 0, 2 * ratio, canvas.height);
+  ctx.beginPath();
+  ctx.arc(splitX, handleY, 19 * ratio, 0, Math.PI * 2);
+  ctx.fillStyle = "#ffffff";
+  ctx.fill();
+  ctx.lineWidth = 2 * ratio;
+  ctx.strokeStyle = MAP.you;
+  ctx.stroke();
+  ctx.fillStyle = MAP.you;
+  for (const side of [-1, 1]) {
+    ctx.beginPath();
+    ctx.moveTo(splitX + side * 12 * ratio, handleY);
+    ctx.lineTo(splitX + side * 5 * ratio, handleY - 6 * ratio);
+    ctx.lineTo(splitX + side * 5 * ratio, handleY + 6 * ratio);
+    ctx.closePath();
+    ctx.fill();
+  }
+  // The date labels sit either side of the line, just under the search and key rows - clear of
+  // the map buttons - and never leave the screen when the line is dragged to an edge.
+  const cssX = splitX / ratio;
+  const cssWidth = canvas.width / ratio;
+  const top = `${el("top").offsetHeight + 16}px`;
+  const before = el("pill-before");
+  const during = el("pill-during");
+  before.style.cssText = `left:${Math.max(cssX - 10, before.offsetWidth + 6)}px;top:${top};transform:translateX(-100%)`;
+  during.style.cssText = `left:${Math.min(cssX + 10, cssWidth - during.offsetWidth - 6)}px;top:${top}`;
+}
+
+/* A fine latitude/longitude grid with degree-minute labels: the instrument's frame of reference,
+   and a quiet reminder that this is a measured surface, not a picture. */
+function drawGraticule(ratio) {
+  const degPerCssPx = metresPerScreenPixel() / 110540;
+  const steps = [1, 2, 5, 10, 15, 30].map((minutes) => minutes / 60);
+  const step = steps.find((candidate) => candidate / degPerCssPx >= 110) || 0.5;
+  const [west, north] = unproject(0, 0);
+  const [east, south] = unproject(canvas.width, canvas.height);
+  const lons = [];
+  const lats = [];
+  for (let lon = Math.ceil(west / step) * step; lon <= east; lon += step) lons.push(lon);
+  for (let lat = Math.ceil(south / step) * step; lat <= north; lat += step) lats.push(lat);
+  ctx.beginPath();
+  for (const lon of lons) {
+    const [x] = project(lon, 0);
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, canvas.height);
+  }
+  for (const lat of lats) {
+    const [, y] = project(0, lat);
+    ctx.moveTo(0, y);
+    ctx.lineTo(canvas.width, y);
+  }
+  ctx.lineWidth = 1 * ratio;
+  ctx.strokeStyle = MAP.grid;
+  ctx.stroke();
+  const dm = (value, hemi) => {
+    const total = Math.round(Math.abs(value) * 60);
+    return `${Math.floor(total / 60)}°${String(total % 60).padStart(2, "0")}′${hemi}`;
+  };
+  ctx.font = `600 ${10 * ratio}px ${FONT}`;
+  ctx.fillStyle = MAP.gridLabel;
+  ctx.textAlign = "left";
+  for (const lat of lats) {
+    const [, y] = project(0, lat);
+    ctx.fillText(dm(lat, "N"), 5 * ratio, y - 4 * ratio);
+  }
+  for (const lon of lons) {
+    const [x] = project(lon, 0);
+    if (x < 130 * ratio) continue;            // the scale bar lives in that corner
+    ctx.fillText(dm(lon, "E"), x + 4 * ratio, canvas.height - 26 * ratio);
+  }
+}
+
+/* Every name on the map, placed in order of importance; a name that would overlap one already
+   placed is skipped rather than drawn on top of it. */
+function drawLabels(ratio, mpp, lens) {
+  const pack = state.pack;
+  const remScale = (parseFloat(getComputedStyle(document.documentElement).fontSize) || 16) / 16;
+  const bn = state.lang === "bn";
+  const boxes = [];
+  const free = (box) => box[2] > 0 && box[0] < canvas.width && box[3] > 0 && box[1] < canvas.height &&
+    !boxes.some((b) => box[0] < b[2] && box[2] > b[0] && box[1] < b[3] && box[3] > b[1]);
+  const spacing = (px) => { if ("letterSpacing" in ctx) ctx.letterSpacing = bn ? "0px" : `${px}px`; };
+  const text = (label, x, y, { size, weight = 600, colour = MAP.label, center = false, track = 0 }) => {
+    if (!label) return false;
+    const px = size * remScale * ratio * (bn ? 1.08 : 1);
+    ctx.font = `${weight} ${px}px ${FONT}`;
+    spacing(track * ratio);
+    const width = ctx.measureText(label).width;
+    const left = center ? x - width / 2 : x;
+    const box = [left - 3 * ratio, y - px, left + width + 3 * ratio, y + px * 0.35];
+    if (!free(box)) {
+      spacing(0);
+      return false;
+    }
+    boxes.push(box);
+    ctx.textAlign = "left";
+    ctx.lineWidth = 3.5 * ratio;
+    ctx.strokeStyle = MAP.halo;
+    ctx.strokeText(label, left, y);
+    ctx.fillStyle = colour;
+    ctx.fillText(label, left, y);
+    spacing(0);
+    return true;
+  };
+
+  // Upazilas, only from far out, where they are the useful names.
+  if (mpp > 40) {
+    for (const area of state.stats?.areas || []) {
+      const [x, y] = project(area.label[0], area.label[1]);
+      const label = bn ? area.name_bn || area.name : area.name.toUpperCase();
+      text(label, x, y, { size: 11.5, weight: 700, colour: "rgba(255,255,255,0.9)", center: true, track: 2.2 });
+    }
+  }
+
+  const places = state.layers.places ? (pack.context.places || []) : [];
+  const ranked = [...places].sort((a, b) => (PLACE_SIZE[b.kind] || 0) - (PLACE_SIZE[a.kind] || 0));
+  const placeLabel = (place) => {
+    if (mpp > (PLACE_VISIBLE_BELOW[place.kind] || 0)) return;
+    const [x, y] = project(place.lon, place.lat);
+    const big = place.kind === "city" || place.kind === "town";
+    if (text(nameIn(place), x + 6 * ratio, y + 4 * ratio, { size: PLACE_SIZE[place.kind] || 12, weight: big ? 700 : 600 })) {
+      ctx.beginPath();
+      ctx.arc(x, y, 3 * ratio, 0, Math.PI * 2);
+      ctx.fillStyle = "#ffffff";
+      ctx.fill();
+      ctx.lineWidth = 1.5 * ratio;
+      ctx.strokeStyle = MAP.halo;
+      ctx.stroke();
+    }
+  };
+  ranked.filter((p) => p.kind === "city" || p.kind === "town").forEach(placeLabel);
+
+  // Points along a line that are actually on screen, so a river or highway is named where the
+  // operator can see it, not at a midpoint that has scrolled away.
+  const margin = 40 * ratio;
+  const onScreen = (coords) => {
+    const step = Math.max(1, Math.floor(coords.length / 12));
+    const points = [];
+    for (let i = Math.floor(step / 2); i < coords.length; i += step) {
+      const [x, y] = project(coords[i][0], coords[i][1]);
+      if (x > margin && y > margin && x < canvas.width - margin && y < canvas.height - margin) points.push([x, y]);
+    }
+    return points;
+  };
+
+  // Rivers by name, once per stretch, in pale teal.
+  if (state.layers.waterways) {
+    const placed = [];
+    for (const way of pack.context.waterways || []) {
+      const label = nameIn(way);
+      if (!label || !(way.kind === "river" || way.kind === "canal")) continue;
+      if (way.kind === "canal" && mpp > 20) continue;
+      for (const [x, y] of onScreen(way.coords)) {
+        if (placed.some((p) => p.label === label && Math.hypot(p.x - x, p.y - y) < 260 * ratio)) continue;
+        if (text(label, x, y, { size: 11.5, weight: 500, colour: MAP.riverLabel, center: true, track: 0.8 })) {
+          placed.push({ label, x, y });
+        }
+      }
+    }
+  }
+
+  // Highway numbers as small shields: "N1" is how a driver names the Dhaka-Chattogram road.
+  if (!lens && state.layers.roads) {
+    const shields = [];
+    ctx.font = `700 ${10 * remScale * ratio}px ${FONT}`;
+    for (const road of pack.context.roads || []) {
+      if (!road.ref || !/^[NR]\d/.test(road.ref) || road.coords.length < 2) continue;
+      const [x, y] = onScreen(road.coords)[0] || [];
+      if (x === undefined) continue;
+      if (shields.some((s) => s.ref === road.ref && Math.hypot(s.x - x, s.y - y) < 220 * ratio)) continue;
+      const width = ctx.measureText(road.ref).width + 8 * ratio;
+      const height = 15 * remScale * ratio;
+      const box = [x - width / 2, y - height / 2, x + width / 2, y + height / 2];
+      if (!free(box)) continue;
+      boxes.push(box);
+      shields.push({ ref: road.ref, x, y });
+      ctx.beginPath();
+      if (ctx.roundRect) ctx.roundRect(box[0], box[1], width, height, 3 * ratio);
+      else ctx.rect(box[0], box[1], width, height);
+      ctx.fillStyle = MAP.shield;
+      ctx.fill();
+      ctx.lineWidth = 1.2 * ratio;
+      ctx.strokeStyle = MAP.road;
+      ctx.stroke();
+      ctx.fillStyle = MAP.road;
+      ctx.textAlign = "center";
+      ctx.fillText(road.ref, x, y + 3.5 * ratio);
+      ctx.textAlign = "left";
+    }
+  }
+
+  ranked.filter((p) => p.kind !== "city" && p.kind !== "town").forEach(placeLabel);
+
+  if (!lens && state.layers.shelters && mpp < LABEL_SHELTERS_BELOW) {
+    for (const shelter of pack.context.shelters || []) {
+      const [x, y] = project(shelter.lon, shelter.lat);
+      text(nameIn(shelter), x + 10 * ratio, y + 4 * ratio, { size: 11.5, weight: 600, colour: "#e6f7f1" });
+    }
+  }
+}
+
+/* The largest round distance that fits in 120 px, so the bar never runs under the map buttons. */
+function scaleStep(ratio) {
+  const metres = ((120 * ratio) / state.view.ppd) * 110540;
+  const steps = [100, 200, 500, 1000, 2000, 5000, 10000, 20000, 50000];
+  return steps.filter((step) => step <= metres).pop() || steps[0];
+}
+
+function drawScale(ratio) {
+  const pick = scaleStep(ratio);
+  el("scale").hidden = false;
+  el("scale-text").textContent = kmText(pick);
+  el("scale-bar").style.width = `${Math.round(((pick / 110540) * state.view.ppd) / ratio)}px`;
+}
+
+/* A small radar picture of one upazila, cut from the pack's own passes, for the Area sheet. The
+   flood-day picture also carries the radar's water edge, so the change is visible at a glance. */
+function drawThumb(target, image, area, withWater) {
+  const imagery = state.pack.imagery;
+  if (!target || !imagery || !image?.naturalWidth) return;
+  const [west, south, east, north] = area.box;
+  const padLon = (east - west) * 0.05;
+  const padLat = (north - south) * 0.05;
+  const [w, s, e, n] = [west - padLon, south - padLat, east + padLon, north + padLat];
+  const aspect = ((e - w) * Math.cos((((s + n) / 2) * Math.PI) / 180)) / (n - s);
+  const ratio = globalThis.devicePixelRatio || 1;
+  const cssWidth = target.clientWidth || 150;
+  target.width = Math.round(cssWidth * ratio);
+  target.height = Math.round((cssWidth * ratio) / aspect);
+  const g = target.getContext("2d");
+  const [bw, bs, be, bn] = imagery.bounds;
+  const sx = ((w - bw) / (be - bw)) * image.naturalWidth;
+  const sy = ((bn - n) / (bn - bs)) * image.naturalHeight;
+  const sw = ((e - w) / (be - bw)) * image.naturalWidth;
+  const sh = ((n - s) / (bn - bs)) * image.naturalHeight;
+  g.drawImage(image, sx, sy, sw, sh, 0, 0, target.width, target.height);
+  g.globalCompositeOperation = "multiply";
+  g.fillStyle = MAP.radarTint;
+  g.fillRect(0, 0, target.width, target.height);
+  g.globalCompositeOperation = "source-over";
+  const at = ([lon, lat]) => [((lon - w) / (e - w)) * target.width, ((n - lat) / (n - s)) * target.height];
+  const trace = (rings) => {
+    g.beginPath();
+    for (const ring of rings) {
+      ring.forEach((point, i) => {
+        const [x, y] = at(point);
+        i ? g.lineTo(x, y) : g.moveTo(x, y);
+      });
+      g.closePath();
+    }
+  };
+  if (withWater) {
+    trace(area.features.flatMap((feature) => feature.rings));
+    g.lineWidth = 1.2 * ratio;
+    g.strokeStyle = MAP.radarEdge;
+    g.stroke();
+  }
+  trace(area.rings);
+  g.setLineDash([4 * ratio, 3 * ratio]);
+  g.lineWidth = 1.3 * ratio;
+  g.strokeStyle = "rgba(255, 255, 255, 0.9)";
+  g.stroke();
+  g.setLineDash([]);
+}
+
+/* ------------------------------------------------------------------ the insight card */
+
+/*
+  One card, always about the point under the reticle (or the operator, with GPS):
+    EARTH    which upazila, which village nearby, whose position, the coordinates
+    SIGNAL   what the radar saw here - and next to it, what the ground has said
+    INSIGHT  the nearest shelter that is outside the water the radar saw
+  and under it, the two buttons that record what the satellite could not see.
+*/
+function updateReadout() {
+  if (!state.pack) return;
+  const pack = state.pack;
+  const text = S();
+  const point = aim();
+  const area = areaAt(point);
+  state.here = area ? area.name : "";
+
+  let place = null;
+  for (const candidate of pack.context.places || []) {
+    const metres = distanceM(point, [candidate.lon, candidate.lat]);
+    if (metres <= NEAR_PLACE_M && (!place || metres < place.metres)) place = { candidate, metres };
+  }
+  el("r-place").textContent = area
+    ? `${text.upazila(areaLabel(area))}${place ? ` · ${text.nearPlace(nameIn(place.candidate))}` : ""}`
+    : text.outside;
+  // Whose position this is comes first: without a fix it is the crosshair, not the operator.
+  const who = gpsHere() ? text.whoGps(num(Math.round(state.fix.accuracy || 0)))
+    : state.fix ? text.whoFar : text.whoCross;
+  el("r-coords").textContent = `${who} · ${point[1].toFixed(4)}, ${point[0].toFixed(4)}`;
+
+  const onWater = state.stats.inWater(point[0], point[1]);
+  const nearby = state.reports.filter((report) =>
+    distanceM(point, [report.lon, report.lat]) <= GROUND_NEAR_M).length;
+  const water = el("r-water");
+  water.textContent = onWater ? text.radarWater : text.radarDry;
+  water.className = onWater ? "hit" : "";
+  // The GROUND line always answers. With reports nearby it counts them; on water with none it
+  // says so; on a spot the radar called dry it carries the radar's blind spot - exactly where the
+  // person standing there is the only one who can see.
+  const ground = el("r-ground");
+  ground.textContent = nearby ? text.groundNear(num(nearby)) : onWater ? text.groundNone : text.limitShort;
+  ground.className = nearby ? "near" : "";
+
+  let nearest = null;
+  for (const shelter of pack.context.shelters || []) {
+    if (shelter.wet) continue;
+    const metres = distanceM(point, [shelter.lon, shelter.lat]);
+    if (!nearest || metres < nearest.metres) nearest = { shelter, metres };
+  }
+  // "unverified" comes before the name, so a long name is what gets cut, never the warning. Once a
+  // route is asked for, the line answers about the route until it is removed. Before that, with the
+  // road network built, the answer is the nearest shelter BY ROAD - a straight line can say one
+  // kilometre where the road is four. Until then, or where no road reaches one, the straight line.
+  const guess = !state.route && state.network ? findRoute(point) : null;
+  const row = el("r-shelter");
+  row.className = (state.route || guess)?.path && !(state.route || guess).dry ? "wet" : "";
+  row.innerHTML = state.route ? routeWords(state.route) : guess?.path
+    ? esc(guess.dry
+      ? text.routeBy(kmText(guess.metres), text.dirs[bearingIndex(point, [guess.shelter.lon, guess.shelter.lat])],
+                     text.kinds[guess.shelter.kind] || guess.shelter.kind, nameIn(guess.shelter))
+      : text.routeWet(kmText(guess.metres), kmText(guess.wet))) + `<small>${text.shelterClear}</small>`
+    : nearest
+    ? `${esc(text.shelterLine(kmText(nearest.metres),
+                              text.dirs[bearingIndex(point, [nearest.shelter.lon, nearest.shelter.lat])],
+                              text.kinds[nearest.shelter.kind] || nearest.shelter.kind, nameIn(nearest.shelter)))}` +
+      `<small>${text.shelterClear}</small>`
+    : esc(text.noShelter);
+  el("btn-route").setAttribute("aria-pressed", String(Boolean(state.route)));
+
+  el("sheet").hidden = false;
+}
+
+/* ------------------------------------------------------------------ sheets */
+
+function togglePanel(name) {
+  state.panel = state.panel === name ? null : name;
+  state.deleteAllArmed = false;
+  el("screen").classList.toggle("panelled", Boolean(state.panel));
+  for (const key of PANELS) {
+    el(`panel-${key}`).hidden = state.panel !== key;
+    el(`tool-${key}`)?.setAttribute("aria-pressed", String(state.panel === key));
+  }
+  closeResults();
+  refreshPanel();
+  if (state.panel) el(`panel-${state.panel}`).scrollTop = 0;
+}
+
+function openPanel(name) {
+  if (state.panel === name) {
+    refreshPanel();
+    el(`panel-${name}`).scrollTop = 0;
+  } else {
+    togglePanel(name);
+  }
+}
+
+function closePanel() {
+  if (state.panel) togglePanel(state.panel);
+}
+
+function refreshPanel() {
+  if (!state.pack) return;
+  if (state.panel === "layers") renderLayers();
+  if (state.panel === "alerts") renderAlerts();
+  if (state.panel === "area") renderArea();
+  if (state.panel === "source") renderSource();
+  if (state.panel === "reports") renderReports();
+  if (state.panel === "packs") renderPacks();
+  if (state.panel === "more") renderMore();
+}
+
+function sheetHead(title) {
+  return `<header class="ph"><h2>${title}</h2><button class="x" data-close aria-label="${S().close}">` +
+         `<svg class="i"><use href="#i-close"/></svg></button></header>`;
+}
+
+/* Each layer's icon IS its map mark, on a scrap of map ground, so the key reads without colour. */
+function icon(kind) {
+  const marks = {
+    photo: `<rect x="3" y="4" width="22" height="16" rx="2" fill="#7a6d5b"/><path d="M3 15c5-4 8 1 12-3s7-1 10-3v11H3z" fill="#3c5a3a"/><path d="M6 20c3-6 6-9 9-16" stroke="#96d6c9" stroke-width="1.6" fill="none"/>`,
+    terrain: `<path d="M2 19 L9 8 L14 14 L19 6 L26 19 Z" fill="#5f7a6e" stroke="#d9e8e2" stroke-width="1.2"/>`,
+    waterways: `<path d="M2 16 Q8 6 14 12 T26 8" fill="none" stroke="#96d6c9" stroke-width="3"/>`,
+    roads: `<line x1="2" y1="12" x2="26" y2="12" stroke="rgba(6,22,17,0.9)" stroke-width="6"/><line x1="2" y1="12" x2="26" y2="12" stroke="#eae6d9" stroke-width="3.2"/>`,
+    places: `<circle cx="7" cy="13" r="2.6" fill="#fff"/><text x="11" y="16.5" font-size="9" font-weight="700" fill="#fff">${state.lang === "bn" ? "গ্রাম" : "Aa"}</text>`,
+    shelters: `<rect x="8" y="5" width="13" height="13" rx="3" fill="#1e7d6b" stroke="#fff" stroke-width="1.5"/><path d="M11 12l3.5-3.5L18 12M12 11.5v3.5h5v-3.5" stroke="#fff" stroke-width="1.4" fill="none"/>`,
+    admin: `<path d="M3 18 L10 6 L25 9" fill="none" stroke="rgba(0,0,0,0.55)" stroke-width="3.2"/><path d="M3 18 L10 6 L25 9" fill="none" stroke="#fff" stroke-width="1.4" stroke-dasharray="3 2.5"/>`,
+    flood: `<defs><pattern id="ih" width="4" height="4" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="4" height="4" fill="rgba(94,224,204,0.35)"/><line x1="0" y1="0" x2="0" y2="4" stroke="#cdfcf3" stroke-width="1.4"/></pattern></defs><rect x="4" y="6" width="20" height="12" rx="2" fill="url(#ih)" stroke="#7ef0dc" stroke-width="1.6"/>`,
+    wet: `<line x1="2" y1="12" x2="26" y2="12" stroke="#1b0507" stroke-width="7"/><line x1="2" y1="12" x2="26" y2="12" stroke="#ff5361" stroke-width="2.4" stroke-dasharray="4 3"/>`,
+    reports: `<circle cx="8" cy="12" r="5.5" fill="#e63946" stroke="#fff" stroke-width="1.8"/><path d="M20 5 L26 17 L14 17 Z" fill="#e63946" stroke="#fff" stroke-width="1.8"/>`,
+    route: `<path d="M3 17 L11 9 L25 9" fill="none" stroke="#fff" stroke-width="6"/><path d="M3 17 L11 9 L25 9" fill="none" stroke="#1e7d6b" stroke-width="3.2"/>`,
+  };
+  return `<svg class="icon" viewBox="0 0 28 24" width="40" height="34" aria-hidden="true"><rect width="28" height="24" rx="5" fill="#0a2a22"/>${marks[kind]}</svg>`;
+}
+
+/* The layers, in the four groups the whole product is built on: Earth, Signal, Insight, Field. */
+function renderLayers() {
+  const pack = state.pack;
+  const text = S();
+  const o = pack.observation;
+  const counts = {
+    flood: (o.features || []).length, wet: state.stats.wetRoads, roads: (pack.context.roads || []).length,
+    waterways: (pack.context.waterways || []).length, places: (pack.context.places || []).length,
+    shelters: (pack.context.shelters || []).length, admin: (pack.areas || []).length, reports: state.reports.length,
+  };
+  const groups = [
+    ["earth", [...(pack.imagery ? ["photo"] : []), ...(pack.terrain.image ? ["terrain"] : []),
+               "waterways", "roads", "places", "shelters", "admin"]],
+    ["signal", ["flood"]],
+    ["insight", ["wet"]],
+    ["field", ["reports"]],
+  ];
+  const sub = (key) => {
+    const words = text.layerSubs[key];
+    const line = typeof words === "function"
+      ? words(key === "photo" ? fmtDate(pack.imagery.optical.date) : fmtDate(o.acquisition_date)) : words;
+    return counts[key] === undefined ? line : `${line} · ${count(counts[key])}`;
+  };
+  el("panel-layers").innerHTML = sheetHead(text.layers) +
+    groups.map(([group, keys]) => `<p class="group">${text.layerGroups[group]}</p>` +
+      keys.map((key) => `<button class="lrow" role="switch" aria-checked="${state.layers[key]}" data-layer="${key}">
+          ${icon(key)}<span class="txt"><b>${text.layerNames[key]}</b><small>${esc(sub(key))}</small></span>
+          <span class="switch" aria-hidden="true"></span></button>`).join("")).join("") +
+    `<p class="plain dim">${text.layersNote}</p><p class="plain dim">${esc(pack.context.attribution)}.</p>` +
+    `<button class="btn wide" id="print-map">${text.printBtn}</button><p class="plain" id="print-say" role="status"></p>` +
+    `<p class="plain dim">${text.printNote}</p>`;
+  el("print-map").addEventListener("click", (event) =>
+    framedStop(event, (words) => { el("print-say").textContent = words; }) || printMap());
+  el("panel-layers").querySelectorAll("[data-layer]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.layers[button.dataset.layer] = !state.layers[button.dataset.layer];
+      button.setAttribute("aria-checked", String(state.layers[button.dataset.layer]));
+      draw();
+    });
+  });
+}
+
+const severity = (share) => SEVERITY.find(([floor]) => share >= floor)[1];
+
+/*
+  Alerts, one per upazila, most water first. Each says what happened, where, when, why it matters
+  and what to do. The severity is a word first and a bar second; only a widespread one is red.
+*/
+function renderAlerts() {
+  const pack = state.pack;
+  const o = pack.observation;
+  const text = S();
+  const admin = adminNames();
+  const totals = o.totals || {};
+  const when = text.whenLine(fmtDate(o.acquisition_date), passClock(o.acquisition_time_utc), fmtDate(o.baseline_date));
+  const cards = state.stats.ranked.map((area) => {
+    const level = severity(area.share);
+    return `<article class="alert ${level}">
+      <p class="sev"><span class="bar" aria-hidden="true"></span><span class="level">${text.sev[level]}</span><span>· ${text.newWater}</span></p>
+      <h3>${esc(areaLabel(area))}</h3>
+      <p class="where">${esc(text.locLine(admin.district, admin.division))}</p>
+      <p class="when">${when}</p>
+      <p class="why">${text.why(num(area.flood_km2), num(area.share))}${text.roadsCross(num(area.wetRoads), area.wetRoads)}${
+        area.people ? text.peopleIn(about(area.people)) : ""}</p>
+      <p class="basis"><span class="mk signal" aria-hidden="true"></span>${text.basis}</p>
+      <button class="btn primary" data-area="${esc(area.name)}">${text.viewArea}</button>
+    </article>`;
+  }).join("");
+  el("panel-alerts").innerHTML = sheetHead(text.alertsTitle) +
+    `<p class="lead">${text.alertsLead(fmtDate(o.acquisition_date))}</p>` +
+    // A pack cut to one upazila holds only part of the district's water and roads, so the district's
+    // totals would not describe it: only the upazila's own card is shown.
+    (pack.subset_of?.area ? "" : `<article class="alert">
+       <p class="sev"><span class="bar" aria-hidden="true"></span><span class="level">${text.newWater}</span></p>
+       <h3>${esc(text.districtTitle(admin.district))}</h3>
+       <p class="when">${when}</p>
+       <p class="why">${text.districtWhy(num(totals.flood_km2), count(totals.patches))}${text.roadsCross(num(state.stats.wetRoads), state.stats.wetRoads)}${
+         pack.population?.people_in_water ? text.peopleIn(about(pack.population.people_in_water)) : ""}</p>
+       <p class="basis"><span class="mk signal" aria-hidden="true"></span>${text.basis}</p>
+     </article>`) + cards + `<p class="plain dim">${text.sevNote}</p>` +
+    (pack.population ? `<p class="plain dim">${text.peopleNote(num(pack.population.year))}</p>` : "");
+  el("panel-alerts").querySelectorAll("[data-area]").forEach((button) => {
+    button.addEventListener("click", () => showArea(button.dataset.area));
+  });
+}
+
+function showArea(name) {
+  state.areaName = name;
+  openPanel("area");
+}
+
+/* The Area sheet is about wherever the reticle is - or the nearest upazila, from outside them. */
+function openHere() {
+  const name = state.here || nearestArea(aim())?.name || "";
+  if (state.panel === "area" && state.areaName === name) closePanel();
+  else showArea(name);
+}
+
+/*
+  The Area sheet: an intelligence brief about one real place. Location and overview first, then
+  the change as the radar saw it, then - folded away until asked for - the signal's details and
+  what stands on the ground there, then what to do next.
+*/
+function renderArea() {
+  const text = S();
+  const pack = state.pack;
+  const o = pack.observation;
+  const area = state.stats.byName[state.areaName] || nearestArea(aim());
+  if (!area) return;
+  state.areaName = area.name;
+  const admin = adminNames();
+  const img = pack.imagery;
+  const name = areaLabel(area);
+  const kindParts = Object.entries(area.kinds).sort((a, b) => b[1] - a[1])
+    .map(([kind, count]) => text.kindCount(num(count), count, text.kinds[kind] || kind)).join(", ");
+  const myReports = state.reports.filter((report) => report.area === area.name).length;
+  el("panel-area").innerHTML = sheetHead(esc(name)) + `
+    <p class="lead">${esc(text.locLine(admin.district, admin.division))}<br>
+      ${text.coordLine(area.label[1].toFixed(3), area.label[0].toFixed(3), num(area.km2))}</p>
+    <p class="sec">${text.sec.overview}</p>
+    <p class="overview">${area.share === null ? text.noOverview
+      : text.overview(esc(name), num(area.flood_km2), num(area.share), area.name === state.stats.top) +
+        (area.people ? text.peopleIn(about(area.people)) : "")}</p>
+    <p class="sec">${text.sec.change}</p>
+    <p class="plain">${area.flood_km2 === null ? ""
+      : text.changeLine(fmtDate(o.baseline_date), fmtDate(o.acquisition_date), num(area.flood_km2))}</p>
+    ${img ? `<div class="thumbs">
+      <figure><canvas id="thumb-before"></canvas><figcaption>${text.before(fmtDate(img.radar.before.date))}</figcaption></figure>
+      <figure><canvas id="thumb-during"></canvas><figcaption>${text.during(fmtDate(img.radar.during.date))}</figcaption></figure>
+    </div>` : ""}
+    <p class="sec">${text.sec.next}</p>
+    <div class="btns">
+      <button class="btn primary" data-go="map">${text.viewOnMap}</button>
+      ${img ? `<button class="btn" data-go="compare">${text.compare}</button>` : ""}
+    </div>
+    <details><summary>${text.sec.signal}</summary>
+      <p class="plain">${esc(text.signalLine(o.platform || o.sensor, fmtDate(o.acquisition_date), passClock(o.acquisition_time_utc)))}</p>
+      <p class="basis"><span class="mk signal" aria-hidden="true"></span>${text.basis}</p>
+      <div class="limit">${text.signalWhat}</div>
+    </details>
+    <details><summary>${text.sec.ground}</summary>
+      <ul class="facts">
+        <li><svg class="i"><use href="#i-pin"/></svg><span>${text.placesHere(num(area.places))}</span></li>
+        <li><svg class="i"><use href="#i-road"/></svg><span>${text.roadsWet(num(area.wetRoads))}</span></li>
+        <li><svg class="i"><use href="#i-shelter"/></svg><span>${text.sheltersLine(num(area.shelters), esc(kindParts))}${
+          area.sheltersWet ? ` · ${text.sheltersWet(num(area.sheltersWet))}` : ""}</span></li>
+        <li><svg class="i"><use href="#i-reports"/></svg><span>${text.myReports(num(myReports), myReports)}</span></li>
+      </ul>
+    </details>`;
+  if (img) {
+    drawThumb(el("thumb-before"), state.images.before, area, false);
+    drawThumb(el("thumb-during"), state.images.during, area, true);
+  }
+  el("panel-area").querySelectorAll("[data-go]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const compare = button.dataset.go === "compare";
+      if (!wide()) closePanel();
+      resize();                          // the map just grew back: fit the area to its new size
+      flyTo(viewFor(area.box, 0.9));
+      if (compare) setLens(true);
+    });
+  });
+}
+
+function renderSource() {
+  const pack = state.pack;
+  const o = pack.observation;
+  const bn = state.lang === "bn";
+  const text = S();
+  const age = ageInDays(o.acquisition_date);
+  const totals = o.totals || {};
+  const event = o.event || {};
+  const share = event.reported_flooded_km2
+    ? Math.round((100 * totals.flood_km2) / event.reported_flooded_km2) : null;
+  const img = pack.imagery;
+  const pop = pack.population;
+  const when = `${fmtDate(o.acquisition_date)}${o.acquisition_time_utc ? `, ${passClock(o.acquisition_time_utc)}` : ""}`;
+  const kept = ["device", "embeddedKept"].includes(state.source?.key) || (state.source?.key === "file" && state.source.kept);
+  const L = bn ? {
+    title: "এই তথ্য কোথা থেকে এলো", flood: "বন্যার পানি — স্যাটেলাইট পর্যবেক্ষণ", sensor: "সেন্সর",
+    product: "প্রোডাক্ট", observed: "পর্যবেক্ষণ", baseline: "তুলনার দিন", detected: "শনাক্ত",
+    threshold: "থ্রেশহোল্ড", source: "উৎস", method: "পদ্ধতি", ago: (n) => `${num(n)} দিন আগে`,
+    how: "কীভাবে মাপা হয়েছে",
+    detectedText: `${num(esc(totals.flood_km2))} বর্গকিমি খোলা পানি, ${count(totals.patches)}টি টুকরোয়`,
+    cannot: "এই স্তর যা দেখতে পায় না।",
+    limitation: "রাডার শুধু খোলা, স্থির পানি চিনতে পারে। ধানক্ষেত, গাছপালা বা ঘরবাড়ির মাঝে দাঁড়িয়ে থাকা পানিতে রাডারের সংকেত পানি থেকে দেয়ালে বা গাছে লেগে সোজা ফিরে আসে (double bounce) — তাই সেখানে পানি উজ্জ্বল দেখায়, আর এই পদ্ধতিতে ধরা পড়ে না। ফলে এখানে দেখানো এলাকা আসলের চেয়ে কম, বিশেষ করে যেখানে মানুষ থাকে।",
+    notTruth: "এটি মাঠে যাচাই করা তথ্য (ground truth) নয়; স্যাটেলাইটের একটি পরিমাপ। মাঠ থেকে আপনার রিপোর্টই এর ফাঁক পূরণ করে।",
+    event: "ঘটনা, আর আমাদের যাচাই", eventName: "ঘটনা", arrived: "বন্যা এলো", peak: "নদীর সর্বোচ্চ উচ্চতা",
+    reported: "প্রকাশিত হিসাব",
+    sanity: `এই স্তরে শনাক্ত হয়েছে ${num(esc(totals.flood_km2))} বর্গকিমি${share !== null ? `, প্রকাশিত হিসাবের প্রায় ${num(share)}%` : ""}। এলাকার ধরন ঘটনার সঙ্গে মেলে: পাহাড়ি ঢল প্রথমে উত্তরের যে উপজেলাগুলোতে নেমেছিল, পানি সেখানেই সবচেয়ে বেশি। পরিমাণ মেলে না, দুটি কারণে — স্যাটেলাইট এই ছবি নিয়েছিল বন্যা আসার দিন, চূড়ায় পৌঁছানোর দুই দিন আগে; আর খোলা পানি শনাক্তের এই পদ্ধতিতে ডুবে যাওয়া গ্রাম ও ফসলের মাঠ বাদ পড়ে। নির্ভুলতার কোনো হার দাবি করা হচ্ছে না: এই ঘটনার যাচাই করা কোনো বন্যা-মানচিত্র নেই।`,
+    photo: "স্যাটেলাইট ছবি — রেফারেন্স", taken: "তোলা হয়েছে", scene: "দৃশ্য", remember: "মনে রাখুন",
+    photoNote: "শুকনো মৌসুমের ছবি, বন্যার আগের। এটি বন্যার ছবি নয়।",
+    radar: "রাডারের দুটি ছবি",
+    radarNote: img ? `আগে-পরে ভিউতে সেই দুটি ছবিই দেখানো হয়, যা থেকে বন্যার স্তর হিসাব করা হয়েছে: ${fmtDate(img.radar.before.date)} আর ${fmtDate(img.radar.during.date)}। রাডারে স্থির পানি কালো দেখায়। ছবিগুলোর উজ্জ্বলতা শুধু দেখানোর জন্য ঠিক করা।` : "",
+    terrain: "ভূমির উচ্চতা — রেফারেন্স", elevation: "উচ্চতা",
+    elevationText: `${num(esc(pack.terrain.elevation_m.min))} থেকে ${num(esc(pack.terrain.elevation_m.max))} মিটার`,
+    limits: "সীমাবদ্ধতা", reference: "রাস্তা, নদী, জায়গা, আশ্রয় — রেফারেন্স",
+    shelterNote: "আশ্রয়ের জায়গাগুলো OpenStreetMap থেকে নেওয়া — যাচাই করা আশ্রয়কেন্দ্রের তালিকা নয়। স্কুল বা মসজিদ থাকলেই যে তা খোলা, শুকনো বা পৌঁছানোর মতো, তার নিশ্চয়তা নেই।",
+    roadsNote: "বন্যার পানির ওপর দিয়ে যাওয়া রাস্তা চিহ্নিত মানেই চলাচল বন্ধ নয়; আবার চিহ্ন না থাকা রাস্তা খোলা আছে, তাও নিশ্চিত নয়। রাডার পানির গভীরতা বা স্রোত জানে না।",
+    device: "এই যন্ত্র", pack: "প্যাক", built: "তৈরি", loaded: "যেখান থেকে লোড", network: "নেটওয়ার্ক",
+    people: "পানির ভেতরে মানুষ — WorldPop মডেল",
+    peopleMethod: "প্রতিটি ১০০ মিটারের ঘরের মানুষ, ঘরটির যতটা অংশ রাডারে দেখা পানির নিচে সেই অনুপাতে (ঘরটিকে ১০ × ১০ ভাগে মেপে), উপজেলা ধরে যোগ করা। ঘরের কেন্দ্র যে উপজেলায়, ঘরটি সেই উপজেলার।",
+    peopleLimits: "এটি মডেলের আনুমানিক হিসাব, মাথা গুনে নয়: WorldPop আদমশুমারির মোট সংখ্যা ঘরবাড়ি থাকা ঘরগুলোতে ভাগ করে দেয়। ঘরবাড়ির ফাঁকে আর গাছপালার নিচের পানি, যেখানে মানুষ থাকে, রাডারে ধরা পড়ে না; তাই আসল সংখ্যা সম্ভবত বেশি।",
+  } : {
+    title: "Where this information comes from", flood: "Flood water — satellite observation",
+    sensor: "Sensor", product: "Product", observed: "Observed", baseline: "Baseline", detected: "Detected",
+    threshold: "Threshold", source: "Source", method: "Method", ago: (n) => `${n} days ago`,
+    how: "How it was measured",
+    detectedText: `${esc(totals.flood_km2)} km² of open water in ${count(totals.patches)} patches`,
+    cannot: "What this layer cannot see.", limitation: esc(o.limitations), notTruth: esc(o.not_ground_truth),
+    event: "The event, and our sanity check", eventName: "Event", arrived: "Flood arrived",
+    peak: "River peak", reported: "Reported",
+    sanity: `This layer detects ${esc(totals.flood_km2)} km²${share !== null ? `, about ${share}% of that reported figure` : ""}. The spatial pattern matches the event: the northern upazilas, hit first by the flash flood off the hills, hold the most water. The magnitude does not, for two stated reasons — this pass was taken on the day the flood arrived, not at the peak two days later, and open-water detection misses flooded villages and cropland. No accuracy figure is claimed: no validated flood map exists for this event.`,
+    photo: "Satellite photo — reference", taken: "Taken", scene: "Scene", remember: "Remember",
+    photoNote: img ? esc(img.optical.note) : "",
+    radar: "The two radar pictures",
+    radarNote: img ? `Before / After shows the two passes the flood layer was computed from: ${fmtDate(img.radar.before.date)} and ${fmtDate(img.radar.during.date)}. Radar sees smooth water as dark. Brightness is scaled for display only.` : "",
+    terrain: "Terrain — reference", elevation: "Elevation",
+    elevationText: `${esc(pack.terrain.elevation_m.min)} to ${esc(pack.terrain.elevation_m.max)} m`,
+    limits: "Limits", reference: "Roads, rivers, places, shelters — reference",
+    shelterNote: esc(pack.context.note), roadsNote: esc(pack.context.roads_note),
+    device: "This device", pack: "Pack", built: "Built", loaded: "Loaded from", network: "Network",
+    people: "People in the water — WorldPop model",
+    peopleMethod: esc(pop?.method), peopleLimits: esc(pop?.limitations),
+  };
+
+  el("panel-source").innerHTML = sheetHead(L.title) + `
+    <p class="sec">${L.flood}</p>
+    <dl class="meta">
+      <dt>${L.sensor}</dt><dd>${esc((o.sensor_detail || o.sensor).replace(/^Sentinel-1\b/, o.platform || "Sentinel-1"))}</dd>
+      <dt>${L.observed}</dt><dd>${when}${age !== null ? ` &mdash; ${L.ago(age)}` : ""}</dd>
+      <dt>${L.baseline}</dt><dd>${fmtDate(o.baseline_date)}</dd>
+      <dt>${L.detected}</dt><dd>${L.detectedText}</dd>
+    </dl>
+    <div class="limit"><b>${L.cannot}</b> ${L.limitation}</div>
+    <p class="plain">${L.notTruth}</p>
+    <details><summary>${L.how}</summary>
+      <dl class="meta">
+        <dt>${L.product}</dt><dd>${esc(o.product) || "&mdash;"}</dd>
+        <dt>${L.threshold}</dt><dd>${esc(o.threshold)} &mdash; ${esc(o.threshold_method)}</dd>
+        <dt>${L.source}</dt><dd>${esc(o.source)}</dd>
+        <dt>${L.method}</dt><dd>${esc(o.method)}</dd>
+      </dl>
+    </details>
+    <details><summary>${L.event}</summary>
+      <dl class="meta">
+        <dt>${L.eventName}</dt><dd>${esc(event.name) || "&mdash;"}</dd>
+        <dt>${L.arrived}</dt><dd>${esc(event.flood_arrived) || "&mdash;"}</dd>
+        <dt>${L.peak}</dt><dd>${esc(event.river_peak) || "&mdash;"}</dd>
+        <dt>${L.reported}</dt><dd>${esc(event.reported_flooded_km2)} km² &mdash; ${esc(event.reported_source)}</dd>
+      </dl>
+      <p class="plain">${L.sanity}</p>
+    </details>
+    ${pop ? `<details><summary>${L.people}</summary>
+      <dl class="meta">
+        <dt>${L.source}</dt><dd>${esc(pop.source)}</dd>
+        <dt>${L.method}</dt><dd>${L.peopleMethod}</dd>
+        <dt>${L.limits}</dt><dd>${L.peopleLimits}</dd>
+      </dl>
+    </details>` : ""}
+    ${img ? `<details><summary>${L.photo}</summary>
+      <dl class="meta">
+        <dt>${L.sensor}</dt><dd>${esc(img.optical.sensor)} &mdash; ${esc(img.optical.product)}</dd>
+        <dt>${L.taken}</dt><dd>${fmtDate(img.optical.date)}, ${passClock(img.optical.time_utc)}</dd>
+        <dt>${L.scene}</dt><dd style="font-size:0.75rem;word-break:break-all">${esc(img.optical.scene)}</dd>
+        <dt>${L.source}</dt><dd>${esc(img.optical.source)}</dd>
+        <dt>${L.remember}</dt><dd>${L.photoNote}</dd>
+      </dl>
+    </details>
+    <details><summary>${L.radar}</summary><p class="plain">${L.radarNote}</p></details>` : ""}
+    <details><summary>${L.terrain}</summary>
+      <dl class="meta">
+        <dt>${L.source}</dt><dd>${esc(pack.terrain.source)}</dd>
+        <dt>${L.elevation}</dt><dd>${L.elevationText}</dd>
+        <dt>${L.limits}</dt><dd>${esc(pack.terrain.limitations)}</dd>
+      </dl>
+    </details>
+    <details><summary>${L.reference}</summary>
+      <p class="plain">${esc(pack.context.attribution)}. ${L.shelterNote}</p>
+      <p class="plain dim">${L.roadsNote}</p>
+    </details>
+    <details open><summary>${L.device}</summary>
+      <dl class="meta">
+        <dt>${L.pack}</dt><dd>${esc(pack.pack_id)} &mdash; ${esc(bn ? pack.name_bn || pack.name : pack.name)}</dd>
+        <dt>${L.built}</dt><dd>${fmtDate(pack.built_on)}</dd>
+        <dt>${L.loaded}</dt><dd>${esc(sourceText())}</dd>
+        ${state.fingerprint ? `<dt>${text.labelRows.code}</dt><dd>${state.fingerprint}</dd>` : ""}
+        <dt>${L.network}</dt><dd>${text.linkWords[state.link]}</dd>
+      </dl>
+      <p class="plain">${kept ? text.offlineReady : text.offlineNot}</p>
+    </details>`;
+}
+
+/*
+  The map's label: what this pack is, read before the map is trusted. It opens with every pack,
+  because a pack can be a file passed from phone to phone, and an old map in a new flood misleads.
+  Everything on it comes from the pack itself, or is worked out from it on this phone.
+*/
+function labelRows() {
+  const pack = state.pack;
+  const o = pack.observation;
+  const text = S();
+  const days = ageInDays(o.acquisition_date);
+  const rows = [
+    [text.labelRows.seen, esc(text.labelSeen(fmtDate(o.acquisition_date), passClock(o.acquisition_time_utc),
+                                             o.platform || o.sensor))],
+    [text.labelRows.age, days === null ? "&mdash;" : esc(text.ageLine(days, count(days))) +
+      `<b class="warn">${esc(text.oldWarn)}</b>`],
+    [text.labelRows.covers, esc(text.coversLine(num(pack.coverage.area_km2), num((pack.areas || []).length),
+                                                (pack.areas || []).length === 1))],
+    [text.labelRows.shows, esc(text.showsLine)],
+  ];
+  // A smaller pack always says which pack it was cut from, so its code can be traced back.
+  if (pack.subset_of) {
+    rows.push([text.cutFrom, esc([pack.subset_of.pack_id, pack.subset_of.fingerprint].filter(Boolean).join(" · "))]);
+  }
+  // Where this phone cannot work the code out, there is no code line at all - never one it did not check.
+  if (state.fingerprint !== null) {
+    rows.push([text.labelRows.code, state.fingerprint
+      ? `<b class="code">${state.fingerprint}</b><small>${esc(text.codeNote)}</small>` : esc(text.codeWorking)]);
+  }
+  return rows.map(([term, value]) => `<dt>${term}</dt><dd>${value}</dd>`).join("");
+}
+
+function renderLabel() {
+  const pack = state.pack;
+  el("label-title").textContent = state.lang === "bn" ? pack.name_bn || pack.name : pack.name;
+  el("label-rows").innerHTML = labelRows();
+}
+
+/* The map picture for paper. The screen's scale bar is a page element, not part of the picture, so
+   the printout gets its own, drawn into the image where it cannot drift out of proportion. */
+function paperMap() {
+  const ratio = globalThis.devicePixelRatio || 1;
+  const sheet = document.createElement("canvas");
+  sheet.width = canvas.width;
+  sheet.height = canvas.height;
+  const pen = sheet.getContext("2d");
+  pen.drawImage(canvas, 0, 0);
+  const pick = scaleStep(ratio);
+  const bar = (pick / 110540) * state.view.ppd;
+  const [x, y] = [14 * ratio, sheet.height - 16 * ratio];
+  pen.fillStyle = "#ffffff";
+  pen.fillRect(x - 8 * ratio, y - 30 * ratio, bar + 16 * ratio, 38 * ratio);
+  pen.fillStyle = "#000000";
+  pen.fillRect(x, y - 5 * ratio, bar, 5 * ratio);
+  pen.font = `700 ${13 * ratio}px sans-serif`;
+  pen.fillText(kmText(pick), x, y - 12 * ratio);
+  return sheet.toDataURL("image/png");
+}
+
+/* A paper copy of what the screen shows, for when the phone's battery is the next thing to go. The
+   browser's own print dialog does the rest: a printer if there is one, otherwise Save as PDF. The
+   sheet carries the same label as the screen, so a printout is never an undated map. */
+function printMap() {
+  const pack = state.pack;
+  const text = S();
+  draw();
+  const key = [...["flood", "wet", "shelters", "reports"].filter((layer) => state.layers[layer]),
+               ...(state.route?.path ? ["route"] : [])]
+    .map((layer) => `<li>${icon(layer)}<span>${text.layerNames[layer]}</span></li>`).join("");
+  el("print-sheet").innerHTML = `
+    <h1>${esc(state.lang === "bn" ? pack.name_bn || pack.name : pack.name)}</h1>
+    <dl class="p-meta">${labelRows()}</dl>
+    <img src="${paperMap()}" alt="">
+    <ul class="p-key">${key}</ul>
+    <p>${esc(text.printFoot(new Date().toLocaleString(state.lang === "bn" ? "bn-BD" : "en-GB")))}</p>
+    <p class="p-small">${esc(pack.observation.source)}. ${esc(pack.context.attribution)}.</p>`;
+  print();
+}
+
+/* The part of a pack picture inside a box, re-encoded as JPEG, with the bounds it now covers. Null
+   when the picture is not loaded or misses the box. */
+function cropPicture(image, [w0, s0, e0, n0], box) {
+  const [w, s, e, n] = [Math.max(box[0], w0), Math.max(box[1], s0), Math.min(box[2], e0), Math.min(box[3], n0)];
+  if (!image?.naturalWidth || w >= e || s >= n) return null;
+  const kx = image.naturalWidth / (e0 - w0);
+  const ky = image.naturalHeight / (n0 - s0);
+  const tile = document.createElement("canvas");
+  tile.width = Math.max(1, Math.round((e - w) * kx));
+  tile.height = Math.max(1, Math.round((n - s) * ky));
+  tile.getContext("2d").drawImage(image, (w - w0) * kx, (n0 - n) * ky, (e - w) * kx, (n - s) * ky,
+                                  0, 0, tile.width, tile.height);
+  return { image: tile.toDataURL("image/jpeg", 0.9), bounds: [w, s, e, n] };
+}
+
+/*
+  A smaller pack, cut on this phone from the pack it holds: one upazila or the whole district, and
+  only the information chosen. Nothing is re-measured or added: layers are left out, lines and
+  points outside the area are dropped (a line crossing the edge is kept whole) and pictures are
+  cropped to it. The radar's water is always kept - without it the card would answer "radar saw
+  no water" everywhere. The figures in `observation` stay the district's, as measured.
+*/
+function cutPack(pack, areaName, keep) {
+  const area = (pack.areas || []).find((candidate) => candidate.name === areaName);
+  const box = area ? boxOf(area.rings) : pack.coverage.bbox;
+  const meets = (coords) => coords.length > 0 && boxesMeet(boxOf([coords]), box);
+  const inside = (point) => inBox(box, point.lon, point.lat);
+  const root = pack.subset_of || { pack_id: pack.pack_id, fingerprint: state.fingerprint || null };
+  const o = pack.observation;
+  const c = pack.context;
+  let imagery;
+  if (keep.pictures && pack.imagery) {
+    const img = pack.imagery;
+    const [optical, before, during] = area
+      ? [state.images.optical, state.images.before, state.images.during].map((image) => cropPicture(image, img.bounds, box))
+      : [];
+    if (!area) imagery = img;
+    else if (optical && before && during) {
+      imagery = { ...img, bounds: optical.bounds, optical: { ...img.optical, image: optical.image },
+                  radar: { ...img.radar, before: { ...img.radar.before, image: before.image },
+                           during: { ...img.radar.during, image: during.image } } };
+    }
+  }
+  const terrain = keep.reference
+    ? (area ? cropPicture(state.images.terrain, pack.terrain.bounds, box) : pack.terrain) : null;
+  const features = (o.features || []).filter((feature) => boxesMeet(boxOf(feature.rings), box));
+  return {
+    ...pack,
+    pack_id: `${root.pack_id}-${area ? area.name.toLowerCase().replace(/[^a-z0-9]+/g, "-") : "district"}`,
+    name: area ? `${pack.name} · ${area.name}` : pack.name,
+    name_bn: area ? `${pack.name_bn || pack.name} · ${area.name_bn || area.name}` : pack.name_bn,
+    subset_of: { pack_id: root.pack_id, fingerprint: root.fingerprint, area: area ? area.name : null },
+    coverage: area ? { bbox: box, area_km2: area.km2, places: [area.name] } : pack.coverage,
+    areas: area ? [area] : pack.areas,
+    observation: { ...o, features, feature_count: features.length },
+    context: { ...c,
+               roads: keep.roads ? (c.roads || []).filter((road) => meets(road.coords)) : [],
+               lanes: keep.roads ? (c.lanes || []).filter((lane) => meets(lane.coords)) : [],
+               waterways: keep.reference ? (c.waterways || []).filter((way) => meets(way.coords)) : [],
+               places: keep.reference ? (c.places || []).filter(inside) : [],
+               shelters: keep.shelters ? (c.shelters || []).filter(inside) : [] },
+    terrain: { ...pack.terrain, bounds: terrain?.bounds || pack.terrain.bounds, image: terrain?.image },
+    imagery,
+  };
+}
+
+/* Hands a file to the phone as a download; from there its share menu can send it on. */
+function saveFile(text, name) {
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(new Blob([text], { type: "application/json" }));
+  link.download = name;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(link.href), 60000);
+}
+
+/*
+  Packs: the pack on this phone - save it to pass on, or open another - and a smaller pack cut from
+  it. The size shown is the exact size of the file that would be saved, not an estimate.
+*/
+function renderPacks() {
+  const pack = state.pack;
+  const text = S();
+  const areas = pack.areas || [];
+  const mb = (words) => num((new Blob([words]).size / 1048576).toFixed(1));
+  if (!state.cut) state.cut = { area: state.here, keep: { pictures: true, roads: true, reference: true, shelters: true } };
+  if (!areas.some((area) => area.name === state.cut.area)) state.cut.area = "";
+  const { area, keep } = state.cut;
+  const cut = cutPack(pack, area, keep);
+  state.cutText = JSON.stringify(cut);
+  const pill = (name, label) => `<button aria-pressed="${area === name}" data-cut-area="${esc(name)}">${esc(label)}</button>`;
+  const row = (key, mark) => `<button class="lrow" role="switch" aria-checked="${key === "flood" || keep[key]}"
+      ${key === "flood" ? 'aria-disabled="true"' : `data-cut-keep="${key}"`}>${icon(mark)}
+      <span class="txt"><b>${text.cutRows[key]}</b><small>${text.cutSubs[key]}</small></span>
+      <span class="switch" aria-hidden="true"></span></button>`;
+  el("panel-packs").innerHTML = sheetHead(text.packs) + `
+    <p class="sec">${text.packsHere}</p>
+    <p class="plain"><b>${esc(state.lang === "bn" ? pack.name_bn || pack.name : pack.name)}</b><br>
+      ${esc(text.packLine(mb(state.packText), state.fingerprint))}</p>
+    <div class="btns">
+      <button class="btn primary" id="pack-save">${text.savePack}</button>
+      <button class="btn" id="pack-other-btn">${text.openOther}</button>
+    </div>
+    <input type="file" id="pack-other" accept=".json,application/json" hidden>
+    ${EMBEDDED_TEXT && state.packText !== EMBEDDED_TEXT ? `<button class="btn wide" id="pack-full">${text.backToFull}</button>` : ""}
+    <p class="plain" id="packs-say" role="status"></p>
+    <p class="plain dim">${text.packsNote}</p>
+    <p class="sec">${text.cutTitle}</p>
+    <p class="plain dim">${text.cutWhen(fmtDate(pack.observation.acquisition_date))}</p>
+    <p class="group">${text.cutArea}</p>
+    <div class="pills">${pill("", text.wholeDistrict)}${areas.map((one) => pill(one.name, areaLabel(one))).join("")}</div>
+    <p class="group">${text.cutInfo}</p>
+    ${row("flood", "flood")}${pack.imagery ? row("pictures", "photo") : ""}${row("roads", "roads")}${row("reference", "waterways")}${row("shelters", "shelters")}
+    <div class="cutbar"><span>${text.cutSize(mb(state.cutText), mb(state.packText))}</span>
+      <button class="btn primary" id="cut-save">${text.saveCut}</button></div>`;
+
+  const panel = el("panel-packs");
+  const packsSay = (words) => {
+    const say = el("packs-say");
+    if (!say) return;
+    say.textContent = words;
+    if (words) say.scrollIntoView({ block: "nearest" });   // "Save the smaller pack" sits far below it
+  };
+  el("pack-save").addEventListener("click", (event) =>
+    framedStop(event, packsSay) || saveFile(state.packText, `${pack.pack_id}.pack.json`));
+  el("pack-other-btn").addEventListener("click", () => el("pack-other").click());
+  el("pack-other").addEventListener("change", (event) =>
+    openPackFile(event.target.files[0], packsSay));
+  el("pack-full")?.addEventListener("click", async () => {
+    openPack(EMBEDDED_TEXT, { key: "embedded" });
+    if (await cachePack(EMBEDDED_TEXT)) state.source.key = "embeddedKept";
+  });
+  el("cut-save").addEventListener("click", (event) =>
+    framedStop(event, packsSay) || saveFile(state.cutText, `${cut.pack_id}.pack.json`));
+  // Each choice redraws the sheet with the new exact size, and puts the focus back where it was.
+  panel.querySelectorAll("[data-cut-area]").forEach((button) => button.addEventListener("click", () => {
+    state.cut.area = button.dataset.cutArea;
+    renderPacks();
+    panel.querySelector(`[data-cut-area="${CSS.escape(state.cut.area)}"]`)?.focus();
+  }));
+  panel.querySelectorAll("[data-cut-keep]").forEach((button) => button.addEventListener("click", () => {
+    keep[button.dataset.cutKeep] = !keep[button.dataset.cutKeep];
+    renderPacks();
+    panel.querySelector(`[data-cut-keep="${button.dataset.cutKeep}"]`)?.focus();
+  }));
+}
+
+/*
+  More: everything that is not one of the four field buttons, one tap away and never competing
+  with them. A row opens the sheet it always opened, or does the one thing it names.
+*/
+const MORE = {
+  print: (event, say) => framedStop(event, say) || printMap(),
+  lens: () => { closePanel(); setLens(true); },
+  area: openHere,
+  label: () => {
+    renderLabel();
+    el("gate-packs").hidden = true;
+    el("label").hidden = false;
+    el("gate").hidden = false;
+  },
+  theme: () => {
+    state.theme = state.theme === "dark" ? "light" : "dark";
+    remember(THEME_KEY, state.theme);
+    applyTheme();
+    refreshPanel();
+  },
+};
+
+function renderMore() {
+  const text = S();
+  const pack = state.pack;
+  const row = (key, words) => `<button class="lrow" data-more="${key}"><span class="txt"><b>${esc(words)}</b></span></button>`;
+  el("more-list").innerHTML = row("reports", text.reportsTitle(num(state.reports.length))) +
+    (state.reports.some((report) => report.via !== "sms")
+      ? `<a class="lrow" id="more-sms" href="sms:?&body=${encodeURIComponent(smsBody())}"><span class="txt"><b>${text.smsSend}</b></span></a>` : "") +
+    row("print", text.printBtn) + row("packs", text.packs) + row("layers", text.layers) +
+    (pack.imagery ? row("lens", text.lens) : "") +
+    row("alerts", text.alerts) + row("area", text.area) + row("source", text.source) +
+    row("label", state.lang === "bn" ? pack.name_bn || pack.name : pack.name) +
+    row("theme", state.theme === "dark" ? text.toLight : text.toDark);
+  const say = (words) => { el("more-say").textContent = words; };
+  el("more-sms")?.addEventListener("click", (event) => framedStop(event, say));
+  el("more-list").querySelectorAll("[data-more]").forEach((button) => button.addEventListener("click", (event) =>
+    (MORE[button.dataset.more] || (() => openPanel(button.dataset.more)))(event, say)));
+}
+
+function sourceText() {
+  const words = S().loadedFrom;
+  if (!state.source) return "";
+  return state.source.key === "file" ? words.file(state.source.file, state.source.kept) : words[state.source.key];
+}
+
+function renderReports() {
+  const text = S();
+  const count = state.reports.length;
+  // Newest first: after an accidental tap, the report to delete is the one at the top.
+  const newestFirst = state.reports.map((report, index) => [report, index]).reverse();
+  const locale = state.lang === "bn" ? "bn-BD" : "en-GB";
+  const list = count
+    ? `<ul class="reports">` + newestFirst.map(([report, index]) => `
+        <li><div class="body"><span class="kind">${report.type === "water_here" ? text.waterHere : text.roadCut}</span>
+          &middot; #${num(index + 1)} &middot; ${report.lat.toFixed(4)}, ${report.lon.toFixed(4)}
+          ${report.area ? "&middot; " + esc(areaName(report.area)) : ""}
+          <div class="when">${new Date(report.at).toLocaleString(locale)} &middot;
+            ${report.accuracy_m ? text.gpsAcc(num(Math.round(report.accuracy_m))) : text.atCrosshair}
+            ${report.via === "sms" ? `&middot; ${text.bySms}` : ""}</div></div>
+          <button data-delete="${esc(report.id)}" aria-label="${text.deleteAria(num(index + 1))}">${text.delete}</button></li>`).join("")
+      + `</ul>`
+    : `<p class="plain">${text.reportsEmpty}</p>`;
+
+  el("panel-reports").innerHTML = sheetHead(text.reportsTitle(num(count))) + `
+    ${list}
+    <p class="sync"><svg class="i" aria-hidden="true"><use href="#i-sync"/></svg><span>${text.syncLine}</span></p>
+    <button class="btn wide primary" id="export-file"><svg class="i" aria-hidden="true"><use href="#i-download"/></svg>${text.exportBtn}</button>
+    <div id="export-out"></div>
+    ${state.reports.some((report) => report.via !== "sms")
+      ? `<div class="btns"><a class="btn" id="sms-send" href="sms:?&body=${encodeURIComponent(smsBody())}">${text.smsSend}</a>` +
+        `<button class="btn" id="sms-copy">${text.smsCopy}</button></div><p class="plain" id="sms-out" role="status"></p>` +
+        `<p class="plain dim">${text.smsNote}</p>` : ""}
+    <p class="sec">${text.smsInTitle}</p>
+    <textarea id="sms-in" aria-label="${text.smsInTitle}" placeholder="${text.smsInHint}"></textarea>
+    <button class="btn wide" id="sms-add">${text.smsAdd}</button>
+    <p class="plain" id="sms-say" role="status">${smsSaid(text)}</p>
+    <p class="plain dim">${text.reportsStored}</p>
+    ${count ? `<button class="btn wide danger far${state.deleteAllArmed ? " armed" : ""}" id="clear-reports">${
+      state.deleteAllArmed ? text.deleteAllArmed(num(count)) : text.deleteAll}</button>` : ""}`;
+
+  el("export-file").addEventListener("click", exportReports);
+  const smsOut = (words) => { el("sms-out").textContent = words; };
+  el("sms-send")?.addEventListener("click", (event) => framedStop(event, smsOut));
+  el("sms-copy")?.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(smsBody());
+      smsOut(text.smsCopied);
+    } catch (error) {
+      // No clipboard either: the message itself, to select by hand.
+      el("sms-out").innerHTML = `${text.smsCopyHand}<textarea readonly>${esc(smsBody())}</textarea>`;
+    }
+  });
+  el("sms-add").addEventListener("click", () => {
+    state.smsRead = readTexts(el("sms-in").value);    // kept as counts, so it re-reads in either language
+    renderReports();
+  });
+  el("panel-reports").querySelectorAll("[data-delete]").forEach((button) => {
+    button.addEventListener("click", () => deleteReport(button.dataset.delete));
+  });
+  const clear = el("clear-reports");
+  if (clear) {
+    // Two separate taps, because this destroys every observation on the device and cannot be
+    // undone. A double tap is not a decision, so the second tap only counts after a pause, and a
+    // primed button disarms itself rather than wait for a stray thumb.
+    clear.addEventListener("click", () => {
+      if (!state.deleteAllArmed) {
+        const armedAt = Date.now();
+        state.deleteAllArmed = armedAt;
+        renderReports();
+        setTimeout(() => {
+          if (state.deleteAllArmed !== armedAt) return;
+          state.deleteAllArmed = false;
+          if (state.panel === "reports") renderReports();
+        }, DELETE_ALL_DISARM_MS);
+        return;
+      }
+      if (Date.now() - state.deleteAllArmed < DELETE_ALL_PAUSE_MS) return;
+      state.reports = [];
+      state.lastId = null;
+      state.deleteAllArmed = false;
+      saveReports();
+      hideNote();
+      afterReportsChanged();
+    });
+  }
+}
+
+/* ------------------------------------------------------------------ search, offline */
+
+/* Every name the pack holds - upazilas, towns, villages, rivers, named shelters - in both scripts.
+   Searching never touches the network. */
+const KIND_RANK = { upazila: 0, city: 1, town: 1, suburb: 2, village: 2, hamlet: 3, river: 4, canal: 5,
+                    hospital: 6, clinic: 6, school: 7, mosque: 8 };
+
+function buildIndex(pack) {
+  const items = state.stats.areas.map((area) => ({
+    kind: "upazila", name: area.name, name_bn: area.name_bn, lon: area.label[0], lat: area.label[1], box: area.box }));
+  for (const place of pack.context.places || []) items.push({ ...place });
+  const rivers = new Map();
+  for (const way of pack.context.waterways || []) {
+    if (!(way.kind === "river" || way.kind === "canal") || !(way.name || way.name_bn) || !way.coords.length) continue;
+    const key = way.name || way.name_bn;
+    if (!rivers.has(key) || way.coords.length > rivers.get(key).coords.length) rivers.set(key, way);
+  }
+  for (const way of rivers.values()) {
+    const [lon, lat] = way.coords[Math.floor(way.coords.length / 2)];
+    items.push({ kind: way.kind, name: way.name, name_bn: way.name_bn, lon, lat });
+  }
+  for (const shelter of pack.context.shelters || []) {
+    if (shelter.name || shelter.name_bn) items.push({ ...shelter });
+  }
+  // OpenStreetMap sometimes holds the same place twice ("Feni General Hospital" / "Feni general
+  // hospital"): one result per kind and name is enough.
+  const seen = new Set();
+  return items.filter((item) => {
+    const key = `${item.kind}|${(item.name || item.name_bn).toLowerCase()}`;
+    return !seen.has(key) && seen.add(key);
+  });
+}
+
+function searchFor(query) {
+  const q = query.trim().toLowerCase();
+  if (!q) return [];
+  return state.index.map((item) => {
+    const at = Math.min(...[item.name, item.name_bn].filter(Boolean).map((name) => {
+      const found = name.toLowerCase().indexOf(q);
+      return found < 0 ? 99 : found === 0 ? 0 : 1;
+    }));
+    return { item, score: at * 10 + (KIND_RANK[item.kind] ?? 9) };
+  }).filter((hit) => hit.score < 990).sort((a, b) => a.score - b.score).slice(0, 7).map((hit) => hit.item);
+}
+
+function renderResults() {
+  const list = el("results");
+  const query = el("q").value;
+  if (!query.trim()) {
+    closeResults();
+    return;
+  }
+  const text = S();
+  state.hits = searchFor(query);
+  list.innerHTML = state.hits.length
+    ? state.hits.map((item, i) => `<li><button type="button" data-hit="${i}"><b>${esc(nameIn(item))}</b>` +
+        `<small>${esc(text.kindNames[item.kind] || item.kind)}</small></button></li>`).join("")
+    : `<li class="none">${text.noResults}</li>`;
+  list.hidden = false;
+}
+
+function closeResults() {
+  el("results").hidden = true;
+}
+
+function goToHit(item) {
+  if (!item) return;
+  closeResults();
+  el("q").value = nameIn(item);
+  el("q").blur();
+  if (state.panel && !wide()) closePanel();
+  resize();
+  flyTo(item.box ? viewFor(item.box, 0.9) : viewAt(item.lon, item.lat, 3000));
+}
+
+/* ------------------------------------------------------------------ field reports */
+
+function buzz() {
+  // A short vibration confirms the tap without the operator having to look. Silently skipped
+  // where unsupported.
+  try {
+    if (navigator.vibrate) navigator.vibrate(70);
+  } catch (error) { /* not supported */ }
+}
+
+function updateCounts() {
+  const water = state.reports.filter((report) => report.type === "water_here").length;
+  const road = state.reports.filter((report) => report.type === "road_cut").length;
+  el("n-water").textContent = S().recorded(num(water));
+  el("n-road").textContent = S().recorded(num(road));
+  // Reports waiting to be handed over: a reason to open the sheet, so the badge is red.
+  const badge = el("nav-count");
+  badge.textContent = num(state.reports.length);
+  badge.hidden = !state.reports.length;
+}
+
+function afterReportsChanged() {
+  // A road cut reported, or taken back, changes which roads a route may use: ask again from the same point.
+  if (state.route) state.route = findRoute(state.route.from);
+  updateCounts();
+  updateReadout();
+  draw();
+  if (["reports", "layers", "area"].includes(state.panel)) refreshPanel();
+}
+
+/* The box above the report buttons. It is a state, not a toast: nothing times out, so an operator
+   who looked away still finds it. It goes when they tap its words, move the map, or record again.
+   It is stored as what it MEANS, so switching language rewrites it in the other language. */
+function showNote(kind, args, undo) {
+  state.note = { kind, args, undo };
+  renderNote();
+}
+
+function renderNote() {
+  if (!state.note) {
+    el("confirm").hidden = true;
+    return;
+  }
+  const text = S();
+  const { kind, args, undo } = state.note;
+  const typeName = (type) => (type === "water_here" ? text.waterHere : text.roadCut);
+  el("confirm-text").innerHTML =
+    kind === "saved" ? text.noteSaved(typeName(args.type), num(args.n), args.stored, args.gps)
+    : kind === "removed" ? text.noteRemoved(typeName(args.type), num(args.left))
+    : kind === "far" ? text.noteFar
+    : kind === "say" ? esc(typeof text[args.key] === "function" ? text[args.key](OWN_ADDRESS) : text[args.key])
+    : text.noteNoFix(text.gps[state.gpsProblem]);
+  el("confirm-undo").hidden = !undo;
+  el("confirm").hidden = false;
+}
+
+function hideNote() {
+  state.note = null;
+  el("confirm").hidden = true;
+}
+
+function addReport(type) {
+  if (!state.pack) return;
+  if (state.panel && !wide()) closePanel();         // so the confirmation can be seen
+  const point = aim();
+  const gps = gpsHere();
+  updateReadout();                                   // so state.here names this exact point
+  const report = {
+    id: `r${Date.now().toString(36)}${state.reports.length}`,
+    type,
+    lon: Number(point[0].toFixed(6)),
+    lat: Number(point[1].toFixed(6)),
+    at: new Date().toISOString(),
+    accuracy_m: gps ? state.fix.accuracy : null,
+    placed: gps ? "gps" : "crosshair",
+    area: state.here || "",
+    pack_id: state.pack.pack_id,
+    hazard: state.pack.hazard.type,
+    source: "field observation",
+    // What the radar said at this exact point, so a later reader can tell what the satellite saw
+    // apart from what the person saw.
+    satellite: {
+      sensor: state.pack.observation.sensor,
+      observation_date: state.pack.observation.acquisition_date,
+      radar_saw_water: state.stats.inWater(point[0], point[1]),
+    },
+  };
+  state.reports.push(report);
+  state.lastId = report.id;
+  const stored = saveReports();
+  buzz();
+  afterReportsChanged();
+  showNote("saved", { type, n: state.reports.length, stored, gps }, true);
+}
+
+function deleteReport(id) {
+  const index = state.reports.findIndex((report) => report.id === id);
+  if (index < 0) return null;
+  const [removed] = state.reports.splice(index, 1);
+  if (state.lastId === id) {       // the box was about this report: it must not say it still exists
+    state.lastId = null;
+    hideNote();
+  }
+  saveReports();
+  afterReportsChanged();
+  return removed;
+}
+
+function undoLast() {
+  if (!state.lastId) return;
+  const removed = deleteReport(state.lastId);
+  if (!removed) return;
+  buzz();
+  showNote("removed", { type: removed.type, left: state.reports.length }, false);
+}
+
+/*
+  Text messages often still get through when mobile data does not. Each report becomes one short
+  line that another Ingito can read back, in plain ASCII so a message keeps its 160 characters:
+    INGITO1 W 23.10060,91.47520 20261011T1804Z G12
+  W = water here, R = road cut; latitude,longitude; the time in UTC; G = GPS (± metres), X = crosshair.
+*/
+const SMS_LINE = /INGITO1 ([WR]) (-?\d{1,2}\.\d{5}),(-?\d{1,3}\.\d{5}) (\d{8}T\d{4}Z) (G\d{1,5}|X)/g;
+
+function smsLine(report) {
+  return `INGITO1 ${report.type === "water_here" ? "W" : "R"} ${report.lat.toFixed(5)},${report.lon.toFixed(5)} ` +
+         `${report.at.replace(/[-:]/g, "").slice(0, 13)}Z ${report.placed === "gps" ? `G${Math.round(report.accuracy_m || 0)}` : "X"}`;
+}
+
+function smsBody() {
+  // The header stays English on purpose: one character outside the basic SMS alphabet and the phone
+  // sends the whole message in a format that holds 70 characters, not 160.
+  const lines = state.reports.filter((report) => report.via !== "sms").map(smsLine);
+  return ["Ingito field reports - paste into Ingito > Reports", ...lines].join("\n");
+}
+
+/* Where the frame blocks an action, explain it in `say` and report true so the caller stops. */
+function framedStop(event, say) {
+  if (!FRAMED) return false;
+  event?.preventDefault();
+  say(S().framedNote(OWN_ADDRESS));
+  return true;
+}
+
+/* Reads report lines out of pasted text, whatever else the message holds, and adds the new ones.
+   They stay marked as received: drawn hollow, listed "by text message", never merged with the radar. */
+function readTexts(words) {
+  const known = new Set(state.reports.map(smsLine));
+  let added = 0;
+  let repeat = 0;
+  for (const [line, kind, lat, lon, stamp, where] of words.matchAll(SMS_LINE)) {
+    if (known.has(line)) {
+      repeat += 1;
+      continue;
+    }
+    const at = `${stamp.slice(0, 4)}-${stamp.slice(4, 6)}-${stamp.slice(6, 8)}T${stamp.slice(9, 11)}:${stamp.slice(11, 13)}:00.000Z`;
+    if (Number.isNaN(Date.parse(at)) || Math.abs(lat) > 90 || Math.abs(lon) > 180) continue;
+    known.add(line);
+    const point = [Number(lon), Number(lat)];
+    state.reports.push({
+      id: `s${Date.now().toString(36)}${state.reports.length}`,
+      type: kind === "W" ? "water_here" : "road_cut",
+      lon: point[0],
+      lat: point[1],
+      at,
+      accuracy_m: where === "X" ? null : Number(where.slice(1)),
+      placed: where === "X" ? "crosshair" : "gps",
+      area: areaAt(point)?.name || "",
+      pack_id: state.pack.pack_id,
+      hazard: state.pack.hazard.type,
+      source: "field observation, received by text message",
+      via: "sms",
+      satellite: {
+        sensor: state.pack.observation.sensor,
+        observation_date: state.pack.observation.acquisition_date,
+        radar_saw_water: state.stats.inWater(point[0], point[1]),
+      },
+    });
+    added += 1;
+  }
+  if (added) {
+    saveReports();
+    afterReportsChanged();
+  }
+  return { added, repeat };
+}
+
+function smsSaid(text) {
+  if (!state.smsRead) return "";
+  const { added, repeat } = state.smsRead;
+  return added ? text.smsAdded(num(added), repeat ? num(repeat) : "")
+    : repeat ? text.smsNothingNew(num(repeat)) : text.smsNone;
+}
+
+/* Export is a file, not an upload. A field team hands observations over the same way it received
+   the pack: as a file, through whatever channel exists when connectivity returns. GeoJSON, so any
+   GIS or humanitarian system can read it without our software. */
+function exportReports() {
+  const text = S();
+  if (!state.reports.length) {
+    el("export-out").innerHTML = `<p class="plain">${text.exportNone}</p>`;
+    return;
+  }
+  const collection = {
+    type: "FeatureCollection",
+    generator: "Ingito field instrument",
+    exported_at: new Date().toISOString(),
+    pack_id: state.pack.pack_id,
+    note: "Human field observations. NOT satellite-derived. Each feature carries its own time and position.",
+    features: state.reports.map((report) => ({
+      type: "Feature",
+      geometry: { type: "Point", coordinates: [report.lon, report.lat] },
+      properties: {
+        id: report.id,
+        observation: report.type,
+        source: report.source || "field observation",
+        recorded_at: report.at,
+        accuracy_m: report.accuracy_m,
+        placed_by: report.placed,
+        area: report.area,
+        hazard: report.hazard,
+        pack_id: report.pack_id,
+        satellite: report.satellite || null,      // null for reports made before this was recorded
+      },
+    })),
+  };
+  const json = JSON.stringify(collection, null, 2);
+  let link = "";
+  try {
+    const url = URL.createObjectURL(new Blob([json], { type: "application/geo+json" }));
+    link = `<a class="btn wide primary" id="export-save" href="${url}" download="ingito-field-reports.geojson">` +
+           `<svg class="i" aria-hidden="true"><use href="#i-download"/></svg>${text.saveFile}</a>`;
+  } catch (error) {
+    link = "";
+  }
+  // The text box is not decoration: if a browser blocks downloads, the operator can still copy
+  // the observations out by hand. The information has to be able to leave the device.
+  el("export-out").innerHTML = link + `<p class="plain" id="export-say" role="status"></p>` +
+    `<p class="plain">${text.exportCopy(num(state.reports.length))}</p><textarea readonly>${json.replace(/</g, "&lt;")}</textarea>`;
+  el("export-save")?.addEventListener("click", (event) =>
+    framedStop(event, (words) => { el("export-say").textContent = words; }));
+}
+
+/* ------------------------------------------------------------------ position */
+
+const GPS_PROBLEMS = { 1: "refused", 2: "unavailable", 3: "searching" };
+
+function startWatching() {
+  if (!navigator.geolocation) {                // the card already says "no GPS"
+    state.gpsProblem = "none";
+    return;
+  }
+  // GPS needs no network. This keeps working in airplane mode, which is the entire point.
+  navigator.geolocation.watchPosition(
+    (position) => {
+      state.fix = { lon: position.coords.longitude, lat: position.coords.latitude,
+                    accuracy: position.coords.accuracy };
+      updateReadout();
+      draw();
+    },
+    // No fix: the card keeps reading the crosshair, and Locate says why.
+    (error) => { state.gpsProblem = GPS_PROBLEMS[error.code] || "searching"; },
+    { enableHighAccuracy: true, maximumAge: 10000, timeout: 20000 });
+  state.watching = true;
+}
+
+/* ------------------------------------------------------------------ the bar, language, theme */
+
+function status() {
+  const text = S();
+  const net = el("chip-net");
+  net.textContent = text.net[state.link];
+  // Offline is the expected state in the field, not an error: shown bright, not red.
+  net.className = state.link === "online" || state.link === "checking" ? "" : "lit";
+
+  const pack = state.pack;
+  el("key").hidden = !pack;
+  if (pack) {
+    const radarView = state.lens && pack.imagery;
+    el("key-swatch").className = radarView ? "mk signal radar" : "mk signal";
+    el("key-text").textContent = radarView ? text.keyRadar : text.keyFlood;
+    // How old the map is, with its caution and its file code, always on screen: the first thing to
+    // know before trusting anything under it.
+    const o = pack.observation;
+    el("seen").textContent = `${text.labelRows.seen}: ${fmtDate(o.acquisition_date)}` +
+      (o.acquisition_time_utc ? `, ${passClock(o.acquisition_time_utc)}` : "");
+    el("stale-warn").textContent = text.oldWarn;
+    el("stale-code").textContent = state.fingerprint ? `${text.labelRows.code} ${state.fingerprint}` : "";
+  }
+  if (state.panel === "source") renderSource();
+}
+
+function applyTheme() {
+  document.documentElement.dataset.theme = state.theme;
+}
+
+/* Switching language rewrites every word on screen, the open sheet, the note box and the map's
+   own labels - there is no half-translated state. */
+function applyLang() {
+  const text = S();
+  document.documentElement.lang = state.lang;
+  document.querySelectorAll("#lang [data-lang]").forEach((button) =>
+    button.setAttribute("aria-pressed", String(button.dataset.lang === state.lang)));
+  document.querySelectorAll("[data-t]").forEach((node) => { node.textContent = text[node.dataset.t]; });
+  el("lens-text").textContent = text.lens;
+  el("route-label").textContent = text.layerNames.route;
+  el("more-close").setAttribute("aria-label", text.close);
+  el("tool-locate").setAttribute("aria-label", text.locate);
+  el("zoom-in").setAttribute("aria-label", text.zoomIn);
+  el("zoom-out").setAttribute("aria-label", text.zoomOut);
+  el("q").placeholder = text.search;
+  el("q").setAttribute("aria-label", text.searchAria);
+  if (state.pack?.imagery) {
+    el("pill-before").textContent = text.before(fmtDate(state.pack.imagery.radar.before.date));
+    el("pill-during").textContent = text.during(fmtDate(state.pack.imagery.radar.during.date));
+  }
+  applyTheme();
+  updateCounts();
+  status();
+  updateReadout();
+  refreshPanel();
+  renderNote();
+  if (!el("results").hidden) renderResults();
+  if (state.found !== undefined && !el("gate").hidden) renderGate();
+  if (state.pack && !el("label").hidden) renderLabel();
+  draw();
+  if (document.fonts?.ready) document.fonts.ready.then(draw);   // map labels in the new script
+}
+
+/* Before / After, from More. It opens with the line in the middle; dragging it shows the water
+   arrive. While it is on, its chip stays on the map as the way back out. */
+function setLens(on) {
+  state.lens = Boolean(on && state.pack?.imagery);
+  el("lens").hidden = !state.lens;
+  el("compare").hidden = !state.lens;
+  state.split = 0.5;
+  status();
+  draw();
+}
+
+/* ------------------------------------------------------------------ pack loading */
+
+function picture(src) {
+  if (!src) return null;
+  const image = new Image();
+  image.onload = draw;            // plain load events: decode() can hang on a data URI
+  image.onerror = draw;
+  image.src = src;
+  return image;
+}
+
+function openPack(text, source) {
+  let pack;
+  try {
+    pack = JSON.parse(text);
+  } catch (error) {
+    throw new Error("the file is damaged or cut short");
+  }
+  if (!pack?.format || !String(pack.format).startsWith("ingito.pack/")) {
+    throw new Error("that file is not an Ingito pack");
+  }
+  // The instrument reads these without checking, so a pack missing one is refused here, before
+  // anything on screen changes, rather than half-opening and breaking the map.
+  const missing = ["observation", "context", "coverage", "terrain", "hazard"].filter((key) => !pack[key]);
+  if (missing.length) throw new Error(`the pack has no ${missing.join(", ")}`);
+  // Lanes are unpacked out of sight of JSON, so a pack saved or cut on this phone keeps them packed.
+  for (const lane of pack.context.lanes || []) {
+    const coords = unpackLine(lane.line);
+    Object.defineProperties(lane, { coords: { value: coords }, box: { value: boxOf([coords]) } });
+  }
+  const stats = computeStats(pack);
+  state.pack = pack;
+  state.source = source;
+  state.stats = stats;
+  state.network = null;                            // the roads are this pack's now
+  state.route = null;
+  // The road network is built just after the map appears, so the first route tap answers at once:
+  // on a slow phone a dead first tap invites a second, which would clear the route again.
+  const idle = globalThis.requestIdleCallback || ((job) => setTimeout(job, 1500));
+  idle(() => {
+    if (state.pack !== pack || state.network) return;
+    state.network = roadNetwork(pack);
+    updateReadout();                               // the shelter line can now answer by road
+  });
+  state.packText = text;                           // saved as a file byte for byte, so its code holds
+  state.fingerprint = undefined;
+  fingerprintOf(text).then((code) => {
+    if (state.pack !== pack) return;               // another pack was opened meanwhile
+    state.fingerprint = code;
+    if (!el("label").hidden) renderLabel();
+    status();
+  });
+  state.index = buildIndex(pack);
+  state.images = {
+    terrain: picture(pack.terrain?.image),
+    optical: picture(pack.imagery?.optical?.image),
+    before: picture(pack.imagery?.radar?.before?.image),
+    during: picture(pack.imagery?.radar?.during?.image),
+  };
+
+  // The map at once: its date, caution and file code are in the bar above it, so nothing has to be
+  // tapped away first. The full label is in More.
+  el("gate").hidden = true;
+  el("reticle").hidden = false;
+  el("top").hidden = false;
+  el("controls").hidden = false;
+  setLens(false);
+  resize();                        // the canvas needs its real size before the view is fitted
+  openOnWater(pack);
+  // On a wide screen the side column is always visible, so it opens on More rather than standing
+  // empty.
+  if (wide() && !state.panel) togglePanel("more");
+  applyLang();
+}
+
+async function listPacks() {
+  for (const url of INDEX_URLS) {
+    try {
+      const response = await fetch(url, { cache: "no-store" });
+      if (response.ok) {
+        return { list: (await response.json()).packs || [], base: url.replace("index.json", "") };
+      }
+    } catch (error) {
+      /* offline, or not served next to a packs folder: fall through to the file picker */
+    }
+  }
+  return null;
+}
+
+/* Download with a byte count. This is the one moment before deployment when somebody on a poor
+   connection must decide whether to keep waiting, so it shows a number, not a spinner. */
+async function downloadText(url, expectedBytes) {
+  const response = await fetch(url, { cache: "no-store" });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const total = Number(response.headers.get("Content-Length")) || expectedBytes || 0;
+  if (!response.body || !response.body.getReader) return response.text();
+  const reader = response.body.getReader();
+  const chunks = [];
+  let received = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    received += value.length;
+    el("progress").textContent = S().downloading(num((received / 1048576).toFixed(1)),
+      total ? num((total / 1048576).toFixed(1)) : "", num(total ? Math.floor((100 * received) / total) : 0));
+  }
+  const bytes = new Uint8Array(received);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return new TextDecoder().decode(bytes);
+}
+
+function renderGate() {
+  const text = S();
+  const card = el("gate-card");
+  const found = state.found;
+  if (!found || !found.list.length) {
+    card.innerHTML = `<div class="row"><span>${text.noPacks}</span></div>
+       <div class="row dim"><span>${text.noPacksHelp}</span></div>`;
+    return;
+  }
+  card.innerHTML = found.list.map((entry) => `
+    <div class="row"><span><b>${esc(entry.name)}</b></span><span>${num(esc(entry.size_mb))} MB</span></div>
+    <div class="row dim"><span>${esc(entry.hazard)} &middot; ${esc(entry.sensor)} ${fmtDate(entry.acquisition_date)}</span>
+      <span>${text.mapArea(num(esc(entry.area_km2)))}</span></div>
+    <button class="btn wide primary" data-pack="${esc(found.base + entry.file)}"
+      data-bytes="${Math.round(entry.size_mb * 1048576)}">${text.downloadPack}</button>`).join("");
+  card.querySelectorAll("[data-pack]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      el("progress").textContent = S().starting;
+      try {
+        const packText = await downloadText(button.dataset.pack, Number(button.dataset.bytes));
+        el("progress").textContent = S().storing;
+        const kept = await cachePack(packText);
+        openPack(packText, { key: kept ? "device" : "downloadedNotStored" });
+        el("progress").textContent = kept ? "" : S().refusedStorage;
+        startWatching();
+      } catch (error) {
+        button.disabled = false;
+        el("progress").textContent = S().couldNot(error.message);
+      }
+    });
+  });
+}
+
+async function boot() {
+  loadReports();
+  const savedTheme = remembered(THEME_KEY);
+  state.theme = savedTheme === "dark" || savedTheme === "light" ? savedTheme
+    : (globalThis.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+  // Bilingual from the first second: a phone set to Bangla opens in Bangla, anything else in
+  // English, and the switch is always on screen either way.
+  const savedLang = remembered(LANG_KEY);
+  state.lang = savedLang === "bn" || savedLang === "en" ? savedLang
+    : ((navigator.languages || [navigator.language]).some((code) => /^bn\b/i.test(code || "")) ? "bn" : "en");
+  applyLang();
+
+  globalThis.addEventListener("online", probe);
+  globalThis.addEventListener("offline", probe);
+  // The map's box changes when a sheet opens, the phone turns, or the window is resized.
+  if ("ResizeObserver" in globalThis) {
+    new ResizeObserver(() => { resize(); draw(); }).observe(el("stage"));
+  } else {
+    globalThis.addEventListener("resize", () => { resize(); draw(); });
+  }
+  probe();
+  setInterval(probe, PROBE_EVERY_MS);
+
+  if ("serviceWorker" in navigator) {
+    // The worker keeps the instrument itself openable with no network. If registration is refused
+    // (some embedded browsers refuse it), the pack in Cache Storage still works.
+    navigator.serviceWorker.register("sw.js").catch(() => {});
+  }
+
+  // A published page carries its own pack. If this device holds an OLDER copy of that same pack,
+  // the page's copy wins - otherwise an updated page would keep showing last week's pack. So does
+  // the same build stored as re-written text by an earlier version of the page, whose fingerprint
+  // would not match. A different pack the operator opened by hand is never replaced.
+  const superseded = (text) => {
+    if (!EMBEDDED_TEXT || text === EMBEDDED_TEXT) return false;
+    try {
+      const head = JSON.parse(text);
+      const page = JSON.parse(EMBEDDED_TEXT);
+      // built_at is to the second; older packs only carry the day, which still sorts earlier.
+      return head.pack_id === page.pack_id &&
+        String(head.built_at || head.built_on) <= String(page.built_at || page.built_on);
+    } catch (error) {
+      return false;
+    }
+  };
+  const stored = await cachedPack();
+  if (stored && !superseded(stored)) {
+    try {
+      openPack(stored, { key: "device" });
+      startWatching();
+      return;
+    } catch (error) {
+      /* a corrupt stored pack must not lock the operator out: fall through to the gate */
+    }
+  }
+
+  const found = await listPacks();
+  if ((!found || !found.list.length) && EMBEDDED_TEXT) {
+    try {
+      const kept = await cachePack(EMBEDDED_TEXT);
+      openPack(EMBEDDED_TEXT, { key: kept ? "embeddedKept" : "embedded" });
+      startWatching();
+      return;
+    } catch (error) {
+      /* fall through to the gate and let the operator open a file */
+    }
+  }
+
+  state.found = found;
+  renderGate();
+  el("pack-file").addEventListener("change", (event) =>
+    openPackFile(event.target.files[0], (words) => { el("progress").textContent = words; }));
+}
+
+/* A pack file chosen on this phone. It is opened - and so checked - BEFORE it is stored, so a bad
+   file never replaces a good pack already on the device. */
+async function openPackFile(file, say) {
+  if (!file) return;
+  say(S().reading(file.name));
+  try {
+    const text = await file.text();
+    openPack(text, { key: "file", file: file.name, kept: false });
+    state.source.kept = await cachePack(text);
+    if (!state.watching) startWatching();
+    say("");
+  } catch (error) {
+    say(S().notPack(error.message));
+  }
+}
+
+/* ------------------------------------------------------------------ input */
+
+/*
+  One finger pans - or, in Before / After, drags the line when it starts on it. Two fingers pinch
+  to zoom about the point between them. Nothing moves on its own except a glide the operator asked
+  for, and touching the map stops that too.
+*/
+function bind() {
+  const pointers = new Map();
+  let gesture = null;
+  const at = (event) => {
+    const box = canvas.getBoundingClientRect();
+    return { x: event.clientX - box.left, y: event.clientY - box.top, width: box.width };
+  };
+  const startPan = (p) => ({ kind: "pan", x: p.x, y: p.y, lon: state.view.lon, lat: state.view.lat });
+
+  canvas.addEventListener("pointerdown", (event) => {
+    closeResults();
+    try {
+      canvas.setPointerCapture(event.pointerId);
+    } catch (error) { /* a pointer already gone must not cost the gesture its second finger */ }
+    const p = at(event);
+    pointers.set(event.pointerId, p);
+    if (pointers.size === 2) {
+      const [a, b] = [...pointers.values()];
+      gesture = { kind: "pinch", spread: Math.hypot(a.x - b.x, a.y - b.y) || 1, ppd: state.view.ppd };
+    } else if (state.lens && Math.abs(p.x - state.split * p.width) < 30) {
+      gesture = { kind: "split" };
+    } else {
+      gesture = startPan(p);
+    }
+  });
+  canvas.addEventListener("pointermove", (event) => {
+    if (!pointers.has(event.pointerId) || !gesture) return;
+    const p = at(event);
+    pointers.set(event.pointerId, p);
+    const ratio = globalThis.devicePixelRatio || 1;
+    if (gesture.kind === "pinch" && pointers.size >= 2) {
+      const [a, b] = [...pointers.values()];
+      const spread = Math.hypot(a.x - b.x, a.y - b.y) || 1;
+      const target = (gesture.ppd * spread) / gesture.spread;
+      zoomAt(target / state.view.ppd, ((a.x + b.x) / 2) * ratio, ((a.y + b.y) / 2) * ratio);
+      hideNote();
+      draw();
+    } else if (gesture.kind === "split") {
+      state.split = Math.min(Math.max(p.x / p.width, 0.03), 0.97);
+      draw();
+    } else if (gesture.kind === "pan") {
+      hideNote();                // moving on: the box steps aside so the reticle is never hidden
+      const squeeze = Math.cos((state.view.lat * Math.PI) / 180);
+      state.view.lon = gesture.lon - ((p.x - gesture.x) * ratio) / (state.view.ppd * squeeze);
+      state.view.lat = gesture.lat + ((p.y - gesture.y) * ratio) / state.view.ppd;
+      draw();
+    }
+  });
+  const end = (event) => {
+    pointers.delete(event.pointerId);
+    if (pointers.size === 1 && gesture?.kind === "pinch") {
+      gesture = startPan([...pointers.values()][0]);   // lift one finger: keep panning with the other
+    } else if (pointers.size === 0) {
+      gesture = null;
+      updateReadout();
+    }
+  };
+  canvas.addEventListener("pointerup", end);
+  canvas.addEventListener("pointercancel", end);
+  canvas.addEventListener("wheel", (event) => {
+    event.preventDefault();
+    const box = canvas.getBoundingClientRect();
+    const ratio = globalThis.devicePixelRatio || 1;
+    zoomAt(event.deltaY < 0 ? 1.25 : 0.8, (event.clientX - box.left) * ratio, (event.clientY - box.top) * ratio);
+    updateReadout();
+    draw();
+  }, { passive: false });
+
+  el("zoom-in").addEventListener("click", () => zoom(1.5));
+  el("zoom-out").addEventListener("click", () => zoom(1 / 1.5));
+  el("lens").addEventListener("click", () => setLens(false));
+  el("btn-route").addEventListener("click", toggleRoute);
+  el("btn-water").addEventListener("click", () => addReport("water_here"));
+  el("btn-road").addEventListener("click", () => addReport("road_cut"));
+  // Share: the pack is saved as a file, and the note says how to pass it on - the phone's own
+  // Quick Share or Bluetooth does the sending.
+  el("btn-share").addEventListener("click", (event) => {
+    if (framedStop(event, () => showNote("say", { key: "framedNote" }, false))) return;
+    saveFile(state.packText, `${state.pack.pack_id}.pack.json`);
+    showNote("say", { key: "packsNote" }, false);
+  });
+  el("tool-more").addEventListener("click", () => togglePanel("more"));
+  el("confirm-undo").addEventListener("click", undoLast);
+  el("label-open").addEventListener("click", () => { el("gate").hidden = true; });
+  el("confirm-text").addEventListener("click", hideNote);
+  document.querySelectorAll(".panel").forEach((panel) => {
+    panel.addEventListener("click", (event) => {
+      if (event.target.closest("[data-close]")) closePanel();
+    });
+  });
+
+  el("q").addEventListener("input", renderResults);
+  el("q").addEventListener("focus", () => { if (el("q").value.trim()) renderResults(); });
+  el("search").addEventListener("submit", (event) => {
+    event.preventDefault();
+    goToHit(state.hits[0]);
+  });
+  el("results").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-hit]");
+    if (button) goToHit(state.hits[Number(button.dataset.hit)]);
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") return;
+    if (!el("results").hidden) closeResults();
+    else closePanel();
+  });
+
+  document.querySelectorAll("#lang [data-lang]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.lang = button.dataset.lang;
+      remember(LANG_KEY, state.lang);
+      applyLang();
+    });
+  });
+  el("tool-locate").addEventListener("click", () => {
+    if (!state.watching) startWatching();
+    if (gpsHere()) {
+      flyTo({ lon: state.fix.lon, lat: state.fix.lat, ppd: Math.max(state.view.ppd, 6000) });
+    } else if (state.fix) {
+      showNote("far", {}, false);          // flying there would show an empty screen
+    } else {
+      // A tap that changes nothing looks like a broken button. Say what is happening instead.
+      showNote("nofix", {}, false);
+    }
+  });
+}
+
+function zoom(factor) {
+  zoomAt(factor);
+  updateReadout();
+  draw();
+}
+
+bind();
+boot();
