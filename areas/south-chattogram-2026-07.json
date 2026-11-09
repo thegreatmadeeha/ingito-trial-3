@@ -35,7 +35,16 @@
   "flood_date": "2026-07-12",
   "track": 69,
   "direction": "ascending",
-
+"optical": {
+  "sensor": "Sentinel-2B",
+  "product": "S2B_MSIL2A_20260716T043219_N0510_R091_T46QCK_20260716T072045.SAFE",
+  "scene": "S2B_MSIL2A_20260716T043219_N0510_R091_T46QCK_20260716T072045",
+  "date": "2026-07-16",
+  "processing_level": "L2A",
+  "tile": "T46QCK",
+  "scene_cloud_cover_pct": 64.2,
+  "aoi_cloud_cover_pct": null
+},
   "event": {
     "name": "July 2026 South Chattogram floods",
     "rain_began": "2026-07-05",
