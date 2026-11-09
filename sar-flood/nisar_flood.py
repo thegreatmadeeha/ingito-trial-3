@@ -39,7 +39,7 @@ import json
 import urllib.parse
 import urllib.request
 import warnings
-
+from datetime import date as _date
 import earthaccess
 import geopandas as gpd
 import h5py
@@ -409,10 +409,137 @@ def main():
 
     properties = {"aoi_name": AOI_NAME, "sensor": SENSOR, "acquisition_date": ",".join(during_dates),
                   "baseline_date": ",".join(before_dates), "threshold": round(threshold, 4)}
-    fe.report(stem, paths["mask"], paths["before"], paths["during"], area, properties, how,
-              f"{AOI_NAME}: NISAR track {TRACK} {DIRECTION.lower()}, HH")
-    print("\nNISAR NOTE: thresholds are not calibrated for L-band yet. Before trusting these numbers, "
-          "run flood_extent.py on the same flood and compare.")
+    polygons = fe.report(
+    stem,
+    paths["mask"],
+    paths["before"],
+    paths["during"],
+    area,
+    properties,
+    how,
+    f"{AOI_NAME}: NISAR track {TRACK} {DIRECTION.lower()}, HH"
+  )
+  
+    # ------------------------------------------------------------------
+    # PROVENANCE: the scientific record that travels with the flood layer.
+    # This follows the Sentinel-1 JSON structure, with NISAR-specific metadata.
+    # ------------------------------------------------------------------
+
+    parts_path = fe.HERE / "aoi" / "chattogram_south_upazilas.geojson"
+    parts = gpd.read_file(parts_path).to_crs(4326)
+
+    # Calculate flood area inside each upazila using a local metric projection.
+    metric_crs = polygons.estimate_utm_crs()
+    flood_metric = polygons.to_crs(metric_crs)
+    parts_metric = parts.to_crs(metric_crs)
+
+    rows = []
+    for _, part in parts_metric.iterrows():
+        name = part["adm3_name"]
+        own_km2 = float(part["area_sqkm"])
+        flooded_km2 = float(
+            flood_metric.intersection(part.geometry).area.sum()
+        ) / 1e6
+
+        rows.append({
+            "name": name,
+            "flood_km2": round(flooded_km2, 1),
+            "upazila_km2": round(own_km2, 1),
+            "share_pct": round(
+                100 * flooded_km2 / own_km2, 1
+            ) if own_km2 else 0
+        })
+
+    rows.sort(key=lambda row: -row["share_pct"])
+
+    # Keep the actual acquisition dates and granule identifiers.
+    scene_ids = {
+        "baseline": [
+            granule["url"].rsplit("/", 1)[-1]
+            for granule in before_files
+        ],
+        "flood": [
+            granule["url"].rsplit("/", 1)[-1]
+            for granule in during_files
+        ]
+    }
+
+    provenance = {
+        "hazard": "flood",
+        "aoi_name": AOI_NAME,
+        "sensor": "NISAR",
+        "sensor_detail": "NASA-ISRO NISAR L-band HH, GCOV gamma-0",
+        "product": "NISAR L2 GCOV, Frequency A, HH polarization",
+        "source": "NASA-ISRO NISAR, Alaska Satellite Facility (ASF) catalogue and data access",
+
+        "scene_ids": scene_ids,
+        "baseline_date": ",".join(before_dates),
+        "acquisition_date": ",".join(during_dates),
+
+        "track": TRACK,
+        "direction": DIRECTION,
+        "polarization": "HH",
+        "grid_m": fe.SCALE_M,
+
+        "threshold": round(float(threshold), 4),
+        "threshold_method": how,
+
+        "processed_on": _date.today().isoformat(),
+        "detects": "open_water_only",
+
+        "method": (
+            "NISAR L2 GCOV HH gamma-0 linear power converted to dB. "
+            "Baseline and flood observations are aligned onto a common "
+            "local UTM grid. A 50 m focal median is applied before the "
+            "two-date ratio calculation. Permanent water from JRC Global "
+            "Surface Water occurrence above 50%, slopes of 5 degrees or "
+            "more, and pixels with baseline brightness at or above -3 dB "
+            "are excluded. The threshold is selected using the NISAR "
+            "processor's Otsu method and configured fallback. Morphological "
+            "opening and an 8-pixel minimum patch filter are applied."
+        ),
+
+        "limitations": (
+            "Experimental NISAR L-band flood classification. The threshold "
+            "has not been independently calibrated for this event. This "
+            "method detects open water only. Flooded vegetation, cropland "
+            "and buildings can produce increased radar backscatter through "
+            "double-bounce effects and may be missed. The detected flood "
+            "area is therefore not a complete estimate of inundation."
+        ),
+
+        "not_ground_truth": (
+            "This is a satellite-derived experimental observation, not "
+            "ground truth. No event-specific independent validation or "
+            "accuracy figure is claimed."
+        ),
+
+        "event": {
+            "name": "July 2026 South Chattogram flood observation",
+            "observation_period": ",".join(during_dates)
+        },
+
+        "totals": {
+            "flood_km2": round(
+                float(polygons.area_km2.sum()), 1
+            ),
+            "patches": int(len(polygons)),
+            "aoi_km2": round(fe.km2(area), 1),
+            "data_coverage_pct": round(
+                100 * float(covered), 1
+            )
+        },
+
+        "by_upazila": rows
+    }
+
+    provenance_path = fe.OUT_DIR / f"{stem}.json"
+    provenance_path.write_text(
+        json.dumps(provenance, indent=2),
+        encoding="utf-8"
+    )
+
+    print(f"\nWrote {provenance_path.name} - NISAR provenance record")
 
 
 if __name__ == "__main__":
