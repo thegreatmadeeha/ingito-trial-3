@@ -1,0 +1,46 @@
+
+{
+  "id": "south-chattogram-2026-07",
+  "aoi_name": "South_Chattogram",
+  "name": "South Chattogram July 2026 flood",
+  "name_bn": "দক্ষিণ চট্টগ্রাম জুলাই ২০২৬ বন্যা",
+
+  "outline": "sar-flood/aoi/chattogram_south.geojson",
+  "parts": "sar-flood/aoi/chattogram_south_upazilas.geojson",
+
+  "admin": {
+    "district": "South Chattogram",
+    "district_bn": "দক্ষিণ চট্টগ্রাম",
+    "division": "Chattogram",
+    "division_bn": "চট্টগ্রাম"
+  },
+
+  "parts_bn": {
+    "Banshkhali": "বাঁশখালী",
+    "Chandanaish": "চন্দনাইশ",
+    "Lohagara": "লোহাগাড়া",
+    "Satkania": "সাতকানিয়া"
+  },
+
+  "known_names": [
+    ["Banshkhali", "বাঁশখালী"],
+    ["Chandanaish", "চন্দনাইশ"],
+    ["Lohagara", "লোহাগাড়া"],
+    ["Satkania", "সাতকানিয়া"],
+    ["South Chattogram", "দক্ষিণ চট্টগ্রাম"]
+  ],
+
+  "sensor": "nisar",
+  "baseline_date": "2026-06-30",
+  "flood_date": "2026-07-12",
+  "track": 69,
+  "direction": "ascending",
+
+  "event": {
+    "name": "July 2026 South Chattogram floods",
+    "rain_began": "2026-07-05",
+    "flood_arrived": "2026-07-12",
+    "reported_flooded_km2": null,
+    "reported_source": ""
+  }
+}
