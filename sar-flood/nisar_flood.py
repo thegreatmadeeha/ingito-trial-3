@@ -53,6 +53,9 @@ from rasterio.warp import Resampling, reproject, transform_bounds
 from rasterio.windows import from_bounds
 
 import flood_extent as fe
+import argparse
+from datetime import timedelta
+from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # SETTINGS. The defaults reproduce the NISAR test: south Chattogram, July 2026.
@@ -88,7 +91,52 @@ DEM_URL = ("https://copernicus-dem-30m.s3.eu-central-1.amazonaws.com/"
            "Copernicus_DSM_COG_10_{ns}{lat:02d}_00_{ew}{lon:03d}_00_DEM/"
            "Copernicus_DSM_COG_10_{ns}{lat:02d}_00_{ew}{lon:03d}_00_DEM.tif")
 SLOPE_SCALE_M = 90          # measure slope over this distance: see public_masks for why not 20 m
+def load_area_config():
+    """Load the NISAR area configuration from the repository's areas folder."""
+    areas_dir = fe.HERE.parent / "areas"
+    configs = sorted(areas_dir.glob("*.json"))
 
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--area", type=Path, default=None)
+    args, _ = parser.parse_known_args()
+
+    if args.area:
+        config_path = args.area
+        if not config_path.is_absolute():
+            config_path = Path.cwd() / config_path
+    else:
+        nisar_configs = [
+            path for path in configs
+            if json.loads(path.read_text(encoding="utf-8")).get("sensor") == "nisar"
+        ]
+
+        if len(nisar_configs) != 1:
+            raise SystemExit(
+                "Could not identify exactly one NISAR area configuration. "
+                "Run with --area followed by the configuration path."
+            )
+
+        config_path = nisar_configs[0]
+
+    if not config_path.is_file():
+        raise SystemExit(f"Area configuration not found: {config_path}")
+
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+
+    if config.get("sensor") != "nisar":
+        raise SystemExit("The selected area configuration is not for NISAR.")
+
+    return config
+
+
+def date_window(day):
+    """Create a three-day search window centred on the configured acquisition date."""
+    centre = _date.fromisoformat(day)
+    return (
+        (centre - timedelta(days=1)).isoformat(),
+        (centre + timedelta(days=1)).isoformat(),
+    )
+  
 
 def h5_size(entry):
     """Size of the .h5 file in a catalogue record. Records normally list every file in the product
@@ -375,8 +423,25 @@ def write_tif(path, array, grid):
 
 
 def main():
-    fe.OUT_DIR.mkdir(exist_ok=True)
-    # Shapely only: fe.load_aoi() also builds an Earth Engine geometry, which this file no longer needs.
+    global AOI_PATH, AOI_NAME, BEFORE, DURING, DIRECTION, TRACK
+
+    settings = load_area_config()
+
+    AOI_PATH = fe.HERE.parent / settings["outline"]
+    AOI_NAME = settings["aoi_name"]
+    BEFORE = date_window(settings["baseline_date"])
+    DURING = date_window(settings["flood_date"])
+    DIRECTION = settings["direction"].upper()
+    TRACK = int(settings["track"])
+
+    fe.OUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    print(f"Area: {settings['name']}")
+    print(f"Baseline target: {settings['baseline_date']}")
+    print(f"Flood target: {settings['flood_date']}")
+    print(f"NISAR track: {TRACK} ({DIRECTION})")
+
+    # Shapely only: fe.load_aoi() also builds an Earth Engine geometry.
     area = gpd.read_file(AOI_PATH).to_crs(4326).union_all()
     grid = target_grid(area)
 
