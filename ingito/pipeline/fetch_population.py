@@ -41,11 +41,16 @@ SAR_OUT = NSAC / "sar-flood" / "out"
 RASTER_DIR = INGITO / "context" / "population"
 OUT_FILE = INGITO / "context" / "population.json"
 
-# The year of the flood. R2025A is WorldPop's 2015-2030 release; "CN" is the constrained product.
-YEAR = 2024
-FILE = f"bgd_pop_{YEAR}_CN_100m_R2025A_v1.tif"
-URL = ("https://data.worldpop.org/GIS/Population/Global_2015_2030/R2025A/"
-       f"{YEAR}/BGD/v1/100m/constrained/{FILE}")
+# WorldPop R2025A covers 2015-2030.
+# The actual year is selected from the flood observation.
+def population_product(year):
+    filename = f"bgd_pop_{year}_CN_100m_R2025A_v1.tif"
+    url = (
+        "https://data.worldpop.org/GIS/Population/Global_2015_2030/R2025A/"
+        f"{year}/BGD/v1/100m/constrained/{filename}"
+    )
+    return filename, url
+  
 SOURCE = ("WorldPop (2025). Constrained estimates of 2015-2030 total number of people per grid "
           "square, 3 arc-seconds (about 100 m), R2025A v1. University of Southampton. "
           "DOI:10.5258/SOTON/WP00839. CC BY 4.0")
@@ -62,8 +67,45 @@ def load_area():
                         default=configs[0] if len(configs) == 1 else None)
     return json.loads(parser.parse_known_args()[0].area.read_text(encoding="utf-8"))
 
+def find_hazard_layer(area):
+    """Find the latest Sentinel-1 or NISAR flood layer."""
+    patterns = (
+        f"{area['aoi_name']}_s1_flood_*.geojson",
+        f"{area['aoi_name']}_nisar_flood_*.geojson",
+    )
 
-def download(path):
+    found = [
+        path
+        for pattern in patterns
+        for path in SAR_OUT.glob(pattern)
+    ]
+
+    if not found:
+        raise SystemExit(
+            f"No Sentinel-1 or NISAR flood layer found in {SAR_OUT}. "
+            "Run the relevant satellite processor first."
+        )
+
+    latest_date = max(
+        path.stem.rsplit("_", 1)[-1] for path in found
+    )
+
+    latest = [
+        path for path in found
+        if path.stem.rsplit("_", 1)[-1] == latest_date
+    ]
+
+    if len(latest) > 1:
+        names = ", ".join(path.name for path in latest)
+        raise SystemExit(
+            f"Multiple sensor layers exist for {latest_date}: {names}. "
+            "Choose the intended observation before calculating population."
+        )
+
+    return latest[0]
+  
+
+def download(path, url):
     """Fetch the country file once. Written under a .tif name until complete, so a cut-short
     download is never mistaken for the real file and git ignores it either way."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -72,7 +114,10 @@ def download(path):
     # The server sometimes drops a request with no answer, and is pickier without a User-Agent.
     for attempt in range(3):
         try:
-            request = urllib.request.Request(URL, headers={"User-Agent": "ingito-pipeline"})
+            request = urllib.request.Request(
+    url, headers={"User-Agent": "ingito-pipeline"}
+            )
+          
             with urllib.request.urlopen(request, timeout=60) as response, partial.open("wb") as out:
                 shutil.copyfileobj(response, out)
             break
@@ -92,15 +137,27 @@ def water_share(flood, transform, shape):
     return fine.reshape(height, SPLIT, width, SPLIT).mean(axis=(1, 3))
 
 
-def main():
+def main()
+
     area = load_area()
+
+    # Select the flood observation first.
+    flood_path = find_hazard_layer(area)
+
+    # Match the WorldPop population year to the observation year.
+    observation_date = flood_path.stem.rsplit("_", 1)[-1]
+    year = int(observation_date[:4])
+
+    FILE, URL = population_product(year)
     raster = RASTER_DIR / FILE
+
     if not raster.exists():
-        download(raster)
-    found = sorted(SAR_OUT.glob(f"{area['aoi_name']}_s1_flood_*.geojson"))
-    if not found:
-        raise SystemExit(f"No flood layer in {SAR_OUT}. Run sar-flood/s1_flood.py first.")
-    flood_path = found[-1]
+        download(raster, URL)
+
+    print(f"Using flood layer: {flood_path.name}")
+    print(f"Using WorldPop population year: {year}")
+
+    flood = gpd.read_file(flood_path).to_crs(4326)
     flood = gpd.read_file(flood_path).to_crs(4326)
     parts = gpd.read_file(NSAC / area["parts"]).to_crs(4326)
     west, south, east, north = parts.total_bounds
@@ -137,7 +194,7 @@ def main():
     print(f"  {'district':14} {total:>8,} of {people[upazila > 0].sum():>10,.0f} people")
 
     block = {
-        "year": YEAR,
+        "year": year,
         "source": SOURCE,
         "product": FILE,
         # The flood layer these figures were computed from. build_pack.py leaves them out of a pack
