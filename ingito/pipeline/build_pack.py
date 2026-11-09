@@ -73,7 +73,42 @@ def load_area():
 AREA = load_area()
 # Which observation to package. The glob keeps this honest: if the pipeline has not been run there
 # is nothing to package, and the script says so instead of inventing a layer.
-HAZARD_GLOB = f"{AREA['aoi_name']}_s1_flood_*.geojson"
+HAZARD_GLOBS = (
+    f"{AREA['aoi_name']}_s1_flood_*.geojson",
+    f"{AREA['aoi_name']}_nisar_flood_*.geojson",
+)
+
+
+def find_hazard_layer():
+    """Find the newest available Sentinel-1 or NISAR flood layer."""
+    found = [
+        path
+        for pattern in HAZARD_GLOBS
+        for path in SAR_OUT.glob(pattern)
+    ]
+
+    if not found:
+        raise SystemExit(
+            f"No Sentinel-1 or NISAR flood layer found in {SAR_OUT}. "
+            "Run the relevant satellite processor first."
+        )
+
+    # The date is the final part of the processor's output filename.
+    latest_date = max(path.stem.rsplit("_", 1)[-1] for path in found)
+    latest = [
+        path for path in found
+        if path.stem.rsplit("_", 1)[-1] == latest_date
+    ]
+
+    if len(latest) > 1:
+        names = ", ".join(path.name for path in latest)
+        raise SystemExit(
+            f"More than one sensor has an output for {latest_date}: {names}. "
+            "Keep only the intended observation in sar-flood/out before packing."
+        )
+
+    return latest[0]
+    
 CONTEXT_FILE = INGITO / "context" / f"{AREA['aoi_name'].lower()}_context.json"
 PARTS_FILE = NSAC / AREA["parts"]
 AOI_FILE = NSAC / AREA["outline"]
@@ -321,7 +356,7 @@ def observation_block():
         raise SystemExit(
             f"No hazard layer in {SAR_OUT}. Run sar-flood/s1_flood.py first - a pack is not "
             "allowed to contain an invented layer.")
-    geojson_path = found[-1]
+    geojson_path = find_hazard_layer() 
     provenance_path = geojson_path.with_suffix(".json")
     if not provenance_path.exists():
         raise SystemExit(f"{geojson_path.name} has no matching provenance file. Re-run s1_flood.py.")
@@ -364,7 +399,8 @@ def main():
     context = json.loads(CONTEXT_FILE.read_text(encoding="utf-8"))
     for key in ("roads", "waterways", "shelters", "places"):
         complete_names(context.get(key, []))
-    wet = mark_wet_roads(context["roads"], sorted(SAR_OUT.glob(HAZARD_GLOB))[-1])
+    hazard_path = find_hazard_layer()
+wet = mark_wet_roads(context["roads"], hazard_path)
     context["roads_crossing_water"] = wet
     context["roads_note"] = ("A road is flagged when it crosses an area where the radar saw open "
                              "water on the observation date. That is not a statement that the road "
@@ -374,7 +410,7 @@ def main():
     print(f"  {len(context['roads'])} roads ({wet} crossing detected water), "
           f"{len(context['waterways'])} waterways, {len(context['shelters'])} shelter points")
     # Added after the road figures are taken, so lanes change none of them.
-    lanes = lanes_block(sorted(SAR_OUT.glob(HAZARD_GLOB))[-1])
+    lanes = lanes_block(hazard_path)
     if lanes:
         context["lanes"] = lanes
 
