@@ -35,11 +35,14 @@ WHAT IS DIFFERENT FROM SENTINEL-1 - read before comparing numbers
   - History: public data starts 17 Jun 2026, with a permanent gap from 27 Jul to 10 Aug 2026.
 """
 
+import argparse
 import json
 import urllib.parse
 import urllib.request
 import warnings
-from datetime import date as _date
+from datetime import date as _date, timedelta
+from pathlib import Path
+
 import earthaccess
 import geopandas as gpd
 import h5py
@@ -53,9 +56,6 @@ from rasterio.warp import Resampling, reproject, transform_bounds
 from rasterio.windows import from_bounds
 
 import flood_extent as fe
-import argparse
-from datetime import timedelta
-from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # SETTINGS. The defaults reproduce the NISAR test: south Chattogram, July 2026.
