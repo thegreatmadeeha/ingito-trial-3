@@ -401,11 +401,16 @@ def main():
     if not CONTEXT_FILE.exists():
         raise SystemExit(f"No {CONTEXT_FILE.name}. Run fetch_context.py first.")
     context = json.loads(CONTEXT_FILE.read_text(encoding="utf-8"))
+        for key in ("roads", "waterways", "shelters", "places"):
+        complete_names(context.get(key, []))
+
     for key in ("roads", "waterways", "shelters", "places"):
         complete_names(context.get(key, []))
-        hazard_path = find_hazard_layer()
+
+    hazard_path = find_hazard_layer()
     wet = mark_wet_roads(context["roads"], hazard_path)
     context["roads_crossing_water"] = wet
+
     context["roads_note"] = ("A road is flagged when it crosses an area where the radar saw open "
                              "water on the observation date. That is not a statement that the road "
                              "is impassable, and an unflagged road is not confirmed open: radar "
