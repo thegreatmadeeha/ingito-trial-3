@@ -400,8 +400,8 @@ def main():
     print("Packing the field context (roads, waterways, shelters)...")
     if not CONTEXT_FILE.exists():
         raise SystemExit(f"No {CONTEXT_FILE.name}. Run fetch_context.py first.")
-    context = json.loads(CONTEXT_FILE.read_text(encoding="utf-8"))
-            for key in ("roads", "waterways", "shelters", "places"):
+        context = json.loads(CONTEXT_FILE.read_text(encoding="utf-8"))
+    for key in ("roads", "waterways", "shelters", "places"):
         complete_names(context.get(key, []))
 
     hazard_path = find_hazard_layer()
