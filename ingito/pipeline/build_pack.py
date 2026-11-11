@@ -351,7 +351,11 @@ def population_block(flood_layer):
 
 def observation_block():
     """The satellite hazard layer, plus everything needed to judge it."""
-    found = sorted(SAR_OUT.glob(HAZARD_GLOB))
+    found = [
+    path
+    for pattern in HAZARD_GLOBS
+    for path in SAR_OUT.glob(pattern)
+    ]
     if not found:
         raise SystemExit(
             f"No hazard layer in {SAR_OUT}. Run sar-flood/s1_flood.py first - a pack is not "
