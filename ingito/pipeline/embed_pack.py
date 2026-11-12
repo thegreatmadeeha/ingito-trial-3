@@ -30,7 +30,8 @@ def main():
     if not found:
         raise SystemExit(f"No pack in {PACKS}. Run build_pack.py first.")
     # The file's exact text, as one string: the app works out the pack's fingerprint from the text
-    # it holds, so a re-serialised copy would show a code that does not match packs/index.json.
+    # it holds, so a re-serialised copy would show a code that does not match
+    # packs/index.json.
     text = found[-1].read_text(encoding="utf-8")
     pack = json.loads(text)
     OUT.write_text(

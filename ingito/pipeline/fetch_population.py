@@ -43,6 +43,8 @@ OUT_FILE = INGITO / "context" / "population.json"
 
 # WorldPop R2025A covers 2015-2030.
 # The actual year is selected from the flood observation.
+
+
 def population_product(year):
     filename = f"bgd_pop_{year}_CN_100m_R2025A_v1.tif"
     url = (
@@ -50,12 +52,14 @@ def population_product(year):
         f"{year}/BGD/v1/100m/constrained/{filename}"
     )
     return filename, url
-  
+
+
 SOURCE = ("WorldPop (2025). Constrained estimates of 2015-2030 total number of people per grid "
           "square, 3 arc-seconds (about 100 m), R2025A v1. University of Southampton. "
           "DOI:10.5258/SOTON/WP00839. CC BY 4.0")
 # Each 100 m square is cut 10 x 10 to measure how much of it is under water: about 9 m, finer
-# than the radar's 20 m grid, so the share is set by the radar, not by this grid.
+# than the radar's 20 m grid, so the share is set by the radar, not by
+# this grid.
 SPLIT = 10
 
 
@@ -65,7 +69,9 @@ def load_area():
     parser = argparse.ArgumentParser()
     parser.add_argument("--area", type=Path, required=len(configs) != 1,
                         default=configs[0] if len(configs) == 1 else None)
-    return json.loads(parser.parse_known_args()[0].area.read_text(encoding="utf-8"))
+    return json.loads(parser.parse_known_args()[
+                      0].area.read_text(encoding="utf-8"))
+
 
 def find_hazard_layer(area):
     """Find the latest Sentinel-1 or NISAR flood layer."""
@@ -103,7 +109,7 @@ def find_hazard_layer(area):
         )
 
     return latest[0]
-  
+
 
 def download(path, url):
     """Fetch the country file once. Written under a .tif name until complete, so a cut-short
@@ -111,20 +117,22 @@ def download(path, url):
     path.parent.mkdir(parents=True, exist_ok=True)
     partial = path.with_name(f"partial-{path.name}")
     print(f"Downloading {path.name} (about 53 MB) from WorldPop...")
-    # The server sometimes drops a request with no answer, and is pickier without a User-Agent.
+    # The server sometimes drops a request with no answer, and is pickier
+    # without a User-Agent.
     for attempt in range(3):
         try:
             request = urllib.request.Request(
-    url, headers={"User-Agent": "ingito-pipeline"}
+                url, headers={"User-Agent": "ingito-pipeline"}
             )
-          
+
             with urllib.request.urlopen(request, timeout=60) as response, partial.open("wb") as out:
                 shutil.copyfileobj(response, out)
             break
         except OSError as error:
             print(f"  attempt {attempt + 1} failed: {error}")
     else:
-        raise SystemExit("WorldPop could not be reached. Check the network and run again.")
+        raise SystemExit(
+            "WorldPop could not be reached. Check the network and run again.")
     partial.replace(path)
 
 
@@ -137,21 +145,22 @@ def water_share(flood, transform, shape):
     return fine.reshape(height, SPLIT, width, SPLIT).mean(axis=(1, 3))
 
 
-def main()
+def main():
 
-    area = load_area()
 
-    # Select the flood observation first.
-    flood_path = find_hazard_layer(area)
+area = load_area()
 
-    # Match the WorldPop population year to the observation year.
-    observation_date = flood_path.stem.rsplit("_", 1)[-1]
-    year = int(observation_date[:4])
+# Select the flood observation first.
+flood_path = find_hazard_layer(area)
 
-    FILE, URL = population_product(year)
-    raster = RASTER_DIR / FILE
+# Match the WorldPop population year to the observation year.
+observation_date = flood_path.stem.rsplit("_", 1)[-1]
+year = int(observation_date[:4])
 
-    if not raster.exists():
+ FILE, URL = population_product(year)
+  raster = RASTER_DIR / FILE
+
+   if not raster.exists():
         download(raster, URL)
 
     print(f"Using flood layer: {flood_path.name}")
@@ -166,39 +175,50 @@ def main()
         top, left = src.index(west, north)
         bottom, right = src.index(east, south)
         window = Window(left, top, right - left + 1, bottom - top + 1)
-        people = src.read(1, window=window, masked=True).filled(0).astype("float64")
+        people = src.read(
+            1,
+            window=window,
+            masked=True).filled(0).astype("float64")
         transform = src.window_transform(window)
 
     share = water_share(flood, transform, people.shape)
-    # A square belongs to the upazila holding its centre: a square on a border is counted once.
+    # A square belongs to the upazila holding its centre: a square on a border
+    # is counted once.
     upazila = features.rasterize(((geometry, index) for index, geometry in enumerate(parts.geometry, 1)),
                                  out_shape=people.shape, transform=transform, dtype="uint8")
 
-    # Check: the water measured on this grid must match the radar layer's own area.
+    # Check: the water measured on this grid must match the radar layer's own
+    # area.
     row_lat = transform.f + transform.e * (np.arange(people.shape[0]) + 0.5)
-    square_km2 = (abs(transform.a) * 111.32 * np.cos(np.radians(row_lat))) * (abs(transform.e) * 110.54)
+    square_km2 = (abs(transform.a) * 111.32 *
+                  np.cos(np.radians(row_lat))) * (abs(transform.e) * 110.54)
     water_km2 = float((share * square_km2[:, None])[upazila > 0].sum())
     radar_km2 = float(flood.area_km2.sum())
     print(f"Water on the population grid: {water_km2:.1f} km2 "
           f"(radar layer: {radar_km2:.1f} km2, {flood_path.name})")
     if abs(water_km2 - radar_km2) > 0.05 * radar_km2:
-        raise SystemExit("The two grids do not line up: the counts would be wrong. Nothing written.")
+        raise SystemExit(
+            "The two grids do not line up: the counts would be wrong. Nothing written.")
 
     in_water = people * share
     rows = []
     for index, name in enumerate(parts.adm3_name, 1):
         here = upazila == index
-        rows.append({"name": name, "people_in_water": int(round(in_water[here].sum()))})
-        print(f"  {name:14} {rows[-1]['people_in_water']:>8,} of {people[here].sum():>10,.0f} people")
+        rows.append({"name": name, "people_in_water": int(
+            round(in_water[here].sum()))})
+        print(
+            f"  {name:14} {rows[-1]['people_in_water']:>8,} of {people[here].sum():>10,.0f} people")
     total = int(round(in_water[upazila > 0].sum()))
-    print(f"  {'district':14} {total:>8,} of {people[upazila > 0].sum():>10,.0f} people")
+    print(
+        f"  {'district':14} {total:>8,} of {people[upazila > 0].sum():>10,.0f} people")
 
     block = {
         "year": year,
         "source": SOURCE,
         "product": FILE,
         # The flood layer these figures were computed from. build_pack.py leaves them out of a pack
-        # built from any other layer: a figure for another layer would be a wrong figure.
+        # built from any other layer: a figure for another layer would be a
+        # wrong figure.
         "flood_layer": flood_path.name,
         "method": (f"Each 100 m square's people, times the share of that square under the water "
                    f"the radar saw (measured on a {SPLIT} x {SPLIT} sub-grid), summed by upazila. "

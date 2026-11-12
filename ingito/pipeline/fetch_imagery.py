@@ -56,7 +56,8 @@ def load_area():
     parser = argparse.ArgumentParser()
     parser.add_argument("--area", type=Path, required=len(configs) != 1,
                         default=configs[0] if len(configs) == 1 else None)
-    return json.loads(parser.parse_known_args()[0].area.read_text(encoding="utf-8"))
+    return json.loads(parser.parse_known_args()[
+                      0].area.read_text(encoding="utf-8"))
 
 
 AREA = load_area()
@@ -70,22 +71,27 @@ RADAR = {"before": (AREA["baseline_date"], Path(f"{_RUN}_before.tif")),
 
 STAC_ITEM = "https://planetarycomputer.microsoft.com/api/stac/v1/collections/sentinel-2-l2a/items/"
 SIGN_URL = "https://planetarycomputer.microsoft.com/api/sas/v1/sign?href="
-AGENT = {"User-Agent": "NSAC-SpaceApps-flood-pack/1.0 (student project, github.com/Nishorgo3051)"}
+AGENT = {
+    "User-Agent": "NSAC-SpaceApps-flood-pack/1.0 (student project, github.com/Nishorgo3051)"}
 
-GRID_M = 20            # one pixel is about 20 m: sharp at street scale, and a few MB for a district
+# one pixel is about 20 m: sharp at street scale, and a few MB for a district
+GRID_M = 20
 PAD_DEG = 0.012        # a kilometre of context beyond the district edge
 # Radar display range in dB. Water sits near -22 dB, fields and villages -15 to -8. Clipping here
-# keeps both readable; the numbers the flood layer was computed from are untouched.
+# keeps both readable; the numbers the flood layer was computed from are
+# untouched.
 RADAR_DB = (-24.0, -7.0)
 
 
 def grid(area):
     """A plain longitude/latitude grid over the district with square-ish 20 m pixels."""
     west, south, east, north = area.bounds
-    west, south, east, north = west - PAD_DEG, south - PAD_DEG, east + PAD_DEG, north + PAD_DEG
+    west, south, east, north = west - PAD_DEG, south - \
+        PAD_DEG, east + PAD_DEG, north + PAD_DEG
     dlat = GRID_M / 110540
     dlon = GRID_M / (111320 * np.cos(np.radians((south + north) / 2)))
-    width, height = int(np.ceil((east - west) / dlon)), int(np.ceil((north - south) / dlat))
+    width, height = int(np.ceil((east - west) / dlon)
+                        ), int(np.ceil((north - south) / dlat))
     transform = Affine(dlon, 0, west, 0, -dlat, north)
     bounds = (west, north - height * dlat, west + width * dlon, north)
     return transform, width, height, bounds
@@ -105,10 +111,26 @@ def read_optical(transform, width, height, bounds):
     rgb = np.zeros((3, height, width), "float32")
     with rasterio.Env(GDAL_DISABLE_READDIR_ON_OPEN="EMPTY_DIR"):
         with rasterio.open("/vsicurl/" + href) as src:
-            window = from_bounds(*transform_bounds("EPSG:4326", src.crs, *bounds), transform=src.transform)
-            shrink = src.res[0] / GRID_M                    # 10 m source: read the half-size overview
-            out_h, out_w = max(1, int(window.height * shrink)), max(1, int(window.width * shrink))
-            data = src.read(window=window, out_shape=(3, out_h, out_w), boundless=True, fill_value=0)
+            window = from_bounds(
+                *
+                transform_bounds(
+                    "EPSG:4326",
+                    src.crs,
+                    *
+                    bounds),
+                transform=src.transform)
+            # 10 m source: read the half-size overview
+            shrink = src.res[0] / GRID_M
+            out_h, out_w = max(1, int(window.height * shrink)
+                               ), max(1, int(window.width * shrink))
+            data = src.read(
+                window=window,
+                out_shape=(
+                    3,
+                    out_h,
+                    out_w),
+                boundless=True,
+                fill_value=0)
             src_transform = src.window_transform(window) * Affine.scale(window.width / out_w,
                                                                         window.height / out_h)
             for band in range(3):
@@ -132,7 +154,8 @@ def grade(rgb):
         low, high = np.percentile(values, [1, 99.5])
         out[band] = np.clip((rgb[band] - low) / (high - low), 0, 1)
     # Lift the shadows so village tree clusters read as trees, not holes, and lift blue less:
-    # winter haze scatters blue light into every shadow and turns the trees slate-coloured.
+    # winter haze scatters blue light into every shadow and turns the trees
+    # slate-coloured.
     out = out ** np.array([0.72, 0.72, 0.82], "float32")[:, None, None]
     grey = out.mean(axis=0, keepdims=True)
     out = np.clip(grey + (out - grey) * 0.9, 0, 1)
@@ -158,7 +181,8 @@ def main():
     transform, width, height, bounds = grid(area)
     print(f"Grid: {width} x {height} pixels at about {GRID_M} m")
 
-    print(f"Reading Sentinel-2 {OPTICAL_ID[:24]}... (true colour, {OPTICAL_DATE})")
+    print(
+        f"Reading Sentinel-2 {OPTICAL_ID[:24]}... (true colour, {OPTICAL_DATE})")
     rgb, item = read_optical(transform, width, height, bounds)
     Image.fromarray(np.moveaxis(grade(rgb), 0, -1)).save(
         OUT / "optical.jpg", quality=80, optimize=True, progressive=True)
@@ -189,7 +213,8 @@ def main():
                      "was computed from, scaled for display only."),
         },
     }
-    (OUT / "imagery.json").write_text(json.dumps(meta, indent=2), encoding="utf-8", newline="\n")
+    (OUT / "imagery.json").write_text(json.dumps(meta,
+                                                 indent=2), encoding="utf-8", newline="\n")
     for path in sorted(OUT.glob("*.jpg")):
         print(f"  {path.name}: {path.stat().st_size / 1024:.0f} KB")
 

@@ -51,7 +51,8 @@ def load_area():
     parser = argparse.ArgumentParser()
     parser.add_argument("--area", type=Path, required=len(configs) != 1,
                         default=configs[0] if len(configs) == 1 else None)
-    return json.loads(parser.parse_known_args()[0].area.read_text(encoding="utf-8"))
+    return json.loads(parser.parse_known_args()[
+                      0].area.read_text(encoding="utf-8"))
 
 
 AREA = load_area()
@@ -59,22 +60,33 @@ AOI_FILE = INGITO.parent / AREA["outline"]
 AOI_NAME = AREA["aoi_name"].lower()
 
 OVERPASS = "https://overpass.private.coffee/api/interpreter"
-# Overpass rejects anonymous scripts with HTTP 406, so identify the project honestly.
-AGENT = {"User-Agent": "NSAC-SpaceApps-flood-pack/1.0 (student project, github.com/Nishorgo3051)"}
+# Overpass rejects anonymous scripts with HTTP 406, so identify the
+# project honestly.
+AGENT = {
+    "User-Agent": "NSAC-SpaceApps-flood-pack/1.0 (student project, github.com/Nishorgo3051)"}
 ATTRIBUTION = ("Roads, waterways, place names and shelter points: OpenStreetMap contributors, ODbL. "
                "Village names: GeoNames, CC BY 4.0")
 
 # Road classes worth carrying. "unclassified" sounds unimportant, but in rural Bangladesh it is the
 # ordinary village road - the route a boat team or a truck actually takes - so it stays. Footpaths
-# and driveways are left out: they would multiply the file size without changing a routing decision.
-ROAD_KINDS = ("motorway", "trunk", "primary", "secondary", "tertiary", "unclassified")
+# and driveways are left out: they would multiply the file size without
+# changing a routing decision.
+ROAD_KINDS = (
+    "motorway",
+    "trunk",
+    "primary",
+    "secondary",
+    "tertiary",
+    "unclassified")
 WATER_KINDS = ("river", "stream", "canal", "drain")
-# Named places, so villages exist on the map as the places people call them, not as blank ground.
+# Named places, so villages exist on the map as the places people call
+# them, not as blank ground.
 PLACE_KINDS = ("city", "town", "suburb", "village", "hamlet")
 BANGLA_SCRIPT = re.compile("[ঀ-৿]")
 
 # How precisely to keep each line. Five decimal places is about one metre, far finer than anybody
-# needs on a phone screen, and it roughly halves the file against full precision.
+# needs on a phone screen, and it roughly halves the file against full
+# precision.
 PLACES = 5
 
 
@@ -85,7 +97,12 @@ def overpass(query):
     started = time.time()
     with urllib.request.urlopen(request, timeout=300) as response:
         raw = response.read()
-    print(f"  Overpass returned {len(raw) / 1024:.0f} KB in {time.time() - started:.0f}s")
+    print(
+        f"  Overpass returned {
+            len(raw) /
+            1024:.0f} KB in {
+            time.time() -
+            started:.0f}s")
     return json.loads(raw)["elements"]
 
 
@@ -128,7 +145,8 @@ def point_of(element):
     lats = [p["lat"] for p in points if p and p.get("lat") is not None]
     if not lons:
         return None
-    return [round(sum(lons) / len(lons), PLACES), round(sum(lats) / len(lats), PLACES)]
+    return [round(sum(lons) / len(lons), PLACES),
+            round(sum(lats) / len(lats), PLACES)]
 
 
 def names(tags):
@@ -138,8 +156,12 @@ def names(tags):
     the Bangla yet - it never transliterates, because an invented spelling of a village name is
     worse than an honest English one. Keys are left out when empty, to keep the pack small.
     """
-    name, bangla, english = tags.get("name", ""), tags.get("name:bn", ""), tags.get("name:en", "")
-    # In Bangladesh the plain "name" is often already in Bangla script, so sort it by script.
+    name, bangla, english = tags.get(
+        "name", ""), tags.get(
+        "name:bn", ""), tags.get(
+            "name:en", "")
+    # In Bangladesh the plain "name" is often already in Bangla script, so
+    # sort it by script.
     if BANGLA_SCRIPT.search(name):
         bangla = bangla or name
     elif name:
@@ -181,9 +203,16 @@ def geonames_villages(bounds, osm_places):
         with urllib.request.urlopen(request, timeout=120) as response:
             GEONAMES_ZIP.write_bytes(response.read())
     west, south, east, north = bounds
-    rows = zipfile.ZipFile(GEONAMES_ZIP).read("BD.txt").decode("utf-8").splitlines()
-    on_minute = lambda value: abs(value * 60 - round(value * 60)) < 1e-3
-    metres = lambda a, b: math.hypot((a[0] - b[0]) * 102000, (a[1] - b[1]) * 110540)
+    rows = zipfile.ZipFile(GEONAMES_ZIP).read(
+        "BD.txt").decode("utf-8").splitlines()
+
+    def on_minute(value): return abs(value * 60 - round(value * 60)) < 1e-3
+
+    def metres(
+        a,
+        b): return math.hypot(
+        (a[0] - b[0]) * 102000,
+        (a[1] - b[1]) * 110540)
     villages, rounded = [], 0
     for line in rows:
         f = line.split("	")
@@ -196,14 +225,21 @@ def geonames_villages(bounds, osm_places):
         if any(metres((lon, lat), (p["lon"], p["lat"])) < NEAR_OSM_M.get(p["kind"], NEAR_OSM_DEFAULT_M)
                for p in osm_places):
             continue
-        if any(metres((lon, lat), (v["lon"], v["lat"])) < NEAR_EACH_OTHER_M for v in villages):
+        if any(metres((lon, lat), (v["lon"], v["lat"]))
+               < NEAR_EACH_OTHER_M for v in villages):
             continue
-        bangla = next((alt for alt in f[3].split(",") if BANGLA_SCRIPT.search(alt)), "")
-        village = {"kind": "village", "lon": round(lon, PLACES), "lat": round(lat, PLACES), "name": f[2]}
+        bangla = next((alt for alt in f[3].split(
+            ",") if BANGLA_SCRIPT.search(alt)), "")
+        village = {
+            "kind": "village", "lon": round(
+                lon, PLACES), "lat": round(
+                lat, PLACES), "name": f[2]}
         if bangla:
             village["name_bn"] = bangla
         villages.append(village)
-    print(f"  GeoNames: {len(villages)} villages kept, {rounded} dropped for rounded coordinates")
+    print(
+        f"  GeoNames: {
+            len(villages)} villages kept, {rounded} dropped for rounded coordinates")
     return villages
 
 
@@ -233,12 +269,14 @@ def main():
             if len(line) > 1:
                 road = {"kind": tags["highway"], "coords": line, **names(tags)}
                 if tags.get("ref"):
-                    road["ref"] = tags["ref"]          # "N1": how a driver names the highway
+                    # "N1": how a driver names the highway
+                    road["ref"] = tags["ref"]
                 roads.append(road)
         elif tags.get("waterway") in WATER_KINDS and element["type"] == "way":
             line = line_of(element)
             if len(line) > 1:
-                waterways.append({"kind": tags["waterway"], "coords": line, **names(tags)})
+                waterways.append(
+                    {"kind": tags["waterway"], "coords": line, **names(tags)})
         elif tags.get("place") in PLACE_KINDS and element["type"] == "node":
             named = names(tags)
             if named:
@@ -253,7 +291,8 @@ def main():
                 continue
             # An unnamed school is still a building you can shelter in, so keep it and let the
             # instrument show the kind instead of inventing a name for it.
-            shelters.append({"kind": kind, "lon": point[0], "lat": point[1], **names(tags)})
+            shelters.append(
+                {"kind": kind, "lon": point[0], "lat": point[1], **names(tags)})
 
     places += geonames_villages(area.bounds, places)
 
@@ -270,17 +309,32 @@ def main():
         "places": places,
     }
     path = OUT_DIR / f"{AOI_NAME}_context.json"
-    path.write_text(json.dumps(context, separators=(",", ":")), encoding="utf-8")
+    path.write_text(
+        json.dumps(
+            context,
+            separators=(
+                ",",
+                ":")),
+        encoding="utf-8")
 
     kinds = {}
     for shelter in shelters:
         kinds[shelter["kind"]] = kinds.get(shelter["kind"], 0) + 1
     print(f"\nWrote context/{path.name} ({path.stat().st_size / 1024:.0f} KB)")
-    print(f"  {len(roads)} road lines, {len(waterways)} waterway lines, {len(places)} named places")
+    print(
+        f"  {
+            len(roads)} road lines, {
+            len(waterways)} waterway lines, {
+                len(places)} named places")
     print(f"  Bangla names: {sum('name_bn' in p for p in places)} places, "
           f"{sum('name_bn' in w for w in waterways)} waterways, {sum('name_bn' in r for r in roads)} roads, "
           f"{sum('name_bn' in s for s in shelters)} shelters")
-    print("  shelters: " + ", ".join(f"{count} {kind}" for kind, count in sorted(kinds.items())))
+    print(
+        "  shelters: " +
+        ", ".join(
+            f"{count} {kind}" for kind,
+            count in sorted(
+                kinds.items())))
 
 
 if __name__ == "__main__":

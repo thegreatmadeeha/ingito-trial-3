@@ -39,15 +39,18 @@ def simplify(lanes, roads):
     """Drop the points that only bend a lane slightly. Every junction stays: a point any other
     way also passes through, or one a lane passes twice."""
     uses = Counter(tuple(point) for line in lanes + roads for point in line)
-    tolerance = TOLERANCE_M / 111320                  # metres to degrees, near enough for this
+    # metres to degrees, near enough for this
+    tolerance = TOLERANCE_M / 111320
     out = []
     for line in lanes:
         kept = [line[0]]
         start = 0
         for i in range(1, len(line)):
             if i == len(line) - 1 or uses[tuple(line[i])] > 1:
-                piece = LineString(line[start:i + 1]).simplify(tolerance, preserve_topology=False)
-                kept += [[round(x, PLACES), round(y, PLACES)] for x, y in list(piece.coords)[1:]]
+                piece = LineString(
+                    line[start:i + 1]).simplify(tolerance, preserve_topology=False)
+                kept += [[round(x, PLACES), round(y, PLACES)]
+                         for x, y in list(piece.coords)[1:]]
                 start = i
         out.append(kept)
     return out
@@ -61,7 +64,10 @@ def main():
 way[highway~"^({'|'.join(LANE_KINDS)})$"]({south:.4f},{west:.4f},{north:.4f},{east:.4f});
 out geom;""")
     lanes = [line for line in map(line_of, elements) if len(line) > 1]
-    roads = json.loads((OUT_DIR / f"{AOI_NAME}_context.json").read_text(encoding="utf-8"))["roads"]
+    roads = json.loads(
+        (OUT_DIR /
+         f"{AOI_NAME}_context.json").read_text(
+            encoding="utf-8"))["roads"]
     before = sum(map(len, lanes))
     lanes = simplify(lanes, [road["coords"] for road in roads])
     path = OUT_DIR / f"{AOI_NAME}_lanes.json"

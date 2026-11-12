@@ -67,7 +67,8 @@ def load_area():
     parser = argparse.ArgumentParser()
     parser.add_argument("--area", type=Path, required=len(configs) != 1,
                         default=configs[0] if len(configs) == 1 else None)
-    return json.loads(parser.parse_known_args()[0].area.read_text(encoding="utf-8"))
+    return json.loads(parser.parse_known_args()[
+                      0].area.read_text(encoding="utf-8"))
 
 
 AREA = load_area()
@@ -108,7 +109,8 @@ def find_hazard_layer():
         )
 
     return latest[0]
-    
+
+
 CONTEXT_FILE = INGITO / "context" / f"{AREA['aoi_name'].lower()}_context.json"
 PARTS_FILE = NSAC / AREA["parts"]
 AOI_FILE = NSAC / AREA["outline"]
@@ -126,7 +128,8 @@ RADAR_WEBP_QUALITY = 75
 HAZARD_TYPE = "flood"
 HAZARD_LABEL = "Flood - open water seen by radar"
 
-# Copernicus DEM GLO-30: open data on AWS, one tile per degree, no account needed.
+# Copernicus DEM GLO-30: open data on AWS, one tile per degree, no account
+# needed.
 DEM_URL = ("https://copernicus-dem-30m.s3.eu-central-1.amazonaws.com/"
            "Copernicus_DSM_COG_10_{ns}{lat:02d}_00_{ew}{lon:03d}_00_DEM/"
            "Copernicus_DSM_COG_10_{ns}{lat:02d}_00_{ew}{lon:03d}_00_DEM.tif")
@@ -152,8 +155,10 @@ def read_dem(area):
     series = gpd.GeoSeries([area], crs=4326)
     crs = series.estimate_utm_crs()
     left, bottom, right, top = series.to_crs(crs).total_bounds
-    width, height = int((right - left) // DEM_GRID_M), int((top - bottom) // DEM_GRID_M)
-    transform = rasterio.transform.from_origin(left, top, DEM_GRID_M, DEM_GRID_M)
+    width, height = int(
+        (right - left) // DEM_GRID_M), int((top - bottom) // DEM_GRID_M)
+    transform = rasterio.transform.from_origin(
+        left, top, DEM_GRID_M, DEM_GRID_M)
     merged = np.full((height, width), np.nan, "float32")
 
     for url in dem_tiles(area.bounds):
@@ -163,7 +168,9 @@ def read_dem(area):
                 with rasterio.open(f"/vsicurl/{url}") as src:
                     window = from_bounds(*transform_bounds("EPSG:4326", src.crs, *area.bounds),
                                          transform=src.transform)
-                    elevation = src.read(1, window=window, masked=True).filled(np.nan).astype("float32")
+                    elevation = src.read(
+                        1, window=window, masked=True).filled(
+                        np.nan).astype("float32")
                     piece = np.full_like(merged, np.nan)
                     reproject(elevation, piece, src_crs=src.crs,
                               src_transform=src.window_transform(window),
@@ -174,7 +181,8 @@ def read_dem(area):
         except rasterio.errors.RasterioIOError as error:
             print(f"  skipped {name}: {error}")
     if np.isnan(merged).all():
-        raise SystemExit("No DEM data could be read. Check the network and run again.")
+        raise SystemExit(
+            "No DEM data could be read. Check the network and run again.")
     return merged, transform, crs
 
 
@@ -189,7 +197,8 @@ def hillshade(elevation, azimuth=315, altitude=45):
     dy, dx = np.gradient(filled, DEM_GRID_M)
     slope = np.arctan(np.hypot(dx, dy))
     aspect = np.arctan2(-dx, dy)
-    sun_altitude, sun_azimuth = np.radians(altitude), np.radians(360 - azimuth + 90)
+    sun_altitude, sun_azimuth = np.radians(
+        altitude), np.radians(360 - azimuth + 90)
     shaded = (np.sin(sun_altitude) * np.cos(slope)
               + np.cos(sun_altitude) * np.sin(slope) * np.cos(sun_azimuth - aspect))
     return np.clip(shaded, 0, 1)
@@ -204,7 +213,8 @@ def to_lonlat(shaded, transform, crs):
     left, bottom, right, top = transform_bounds(
         crs, "EPSG:4326", *rasterio.transform.array_bounds(*shaded.shape, transform))
     height, width = shaded.shape
-    target = rasterio.transform.from_bounds(left, bottom, right, top, width, height)
+    target = rasterio.transform.from_bounds(
+        left, bottom, right, top, width, height)
     out = np.full((height, width), np.nan, "float32")
     reproject(shaded, out, src_crs=crs, src_transform=transform, dst_crs="EPSG:4326",
               dst_transform=target, resampling=Resampling.bilinear,
@@ -221,12 +231,14 @@ def rings_of(geometry):
     figure in the provenance block was computed from the full geometry BEFORE this simplification,
     so the reported numbers are unaffected by it.
     """
-    parts = geometry.geoms if geometry.geom_type.startswith("Multi") else [geometry]
+    parts = geometry.geoms if geometry.geom_type.startswith("Multi") else [
+        geometry]
     rings = []
     for part in parts:
         if part.is_empty:
             continue
-        coords = [[round(x, PLACES), round(y, PLACES)] for x, y in part.exterior.coords]
+        coords = [[round(x, PLACES), round(y, PLACES)]
+                  for x, y in part.exterior.coords]
         if len(coords) > 2:
             rings.append(coords)
     return rings
@@ -255,15 +267,18 @@ def mark_wet_roads(roads, geojson_path):
         return 0
     lines = gpd.GeoDataFrame(
         geometry=[LineString(road["coords"]) for road in roads], crs=4326)
-    hit = gpd.sjoin(lines, flood[["geometry"]], how="inner", predicate="intersects")
+    hit = gpd.sjoin(lines, flood[["geometry"]],
+                    how="inner", predicate="intersects")
     wet_rows = set(hit.index)
     water = flood.geometry.union_all()
     for index, road in enumerate(roads):
         road["wet"] = index in wet_rows
         if road["wet"]:
             # Only the stretch inside the water, so a 10 km road with 50 m under water is not
-            # drawn as if all 10 km were. A road that only touches a patch's edge gets no parts.
-            road["wet_parts"] = line_parts(lines.geometry[index].intersection(water))
+            # drawn as if all 10 km were. A road that only touches a patch's
+            # edge gets no parts.
+            road["wet_parts"] = line_parts(
+                lines.geometry[index].intersection(water))
     return len(wet_rows)
 
 
@@ -279,9 +294,11 @@ def complete_names(items):
     to_bn = dict(AREA["known_names"])
     to_en = {bn: en for en, bn in AREA["known_names"]}
     for item in items:
-        if item.get("name") and not item.get("name_bn") and item["name"] in to_bn:
+        if item.get("name") and not item.get(
+                "name_bn") and item["name"] in to_bn:
             item["name_bn"] = to_bn[item["name"]]
-        if item.get("name_bn") and not item.get("name") and item["name_bn"] in to_en:
+        if item.get("name_bn") and not item.get(
+                "name") and item["name_bn"] in to_en:
             item["name"] = to_en[item["name_bn"]]
 
 
@@ -304,21 +321,30 @@ def lanes_block(geojson_path):
             point = (round(lon * 1e5), round(lat * 1e5))
             line += [point[0] - last[0], point[1] - last[1]]
             last = point
-        packed.append({"line": line, **({"wet": True, "wet_parts": lane["wet_parts"]} if lane["wet"] else {})})
-    print(f"  {len(packed)} lanes and tracks for routing ({wet} crossing detected water)")
+        packed.append({"line": line, **({"wet": True,
+                      "wet_parts": lane["wet_parts"]} if lane["wet"] else {})})
+    print(
+        f"  {
+            len(packed)} lanes and tracks for routing ({wet} crossing detected water)")
     return packed
 
 
 def data_uri(path, mime="image/jpeg"):
     """Embed a picture in the pack. Base64 costs a third in size and keeps the pack ONE file."""
-    return f"data:{mime};base64," + base64.b64encode(path.read_bytes()).decode("ascii")
+    return f"data:{mime};base64," + \
+        base64.b64encode(path.read_bytes()).decode("ascii")
 
 
 def webp_uri(path):
     """A radar picture as WebP: a third smaller than its JPEG, and the speckle looks the same."""
     buffer = io.BytesIO()
-    Image.open(path).save(buffer, format="WEBP", quality=RADAR_WEBP_QUALITY, method=6)
-    return "data:image/webp;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
+    Image.open(path).save(
+        buffer,
+        format="WEBP",
+        quality=RADAR_WEBP_QUALITY,
+        method=6)
+    return "data:image/webp;base64," + \
+        base64.b64encode(buffer.getvalue()).decode("ascii")
 
 
 def imagery_block():
@@ -329,9 +355,11 @@ def imagery_block():
         print("  no imagery (run fetch_imagery.py to add the satellite pictures)")
         return None
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
-    meta["optical"]["image"] = data_uri(IMAGERY_DIR / meta["optical"].pop("file"))
+    meta["optical"]["image"] = data_uri(
+        IMAGERY_DIR / meta["optical"].pop("file"))
     for when in ("before", "during"):
-        meta["radar"][when]["image"] = webp_uri(IMAGERY_DIR / meta["radar"][when].pop("file"))
+        meta["radar"][when]["image"] = webp_uri(
+            IMAGERY_DIR / meta["radar"][when].pop("file"))
     return meta
 
 
@@ -352,18 +380,19 @@ def population_block(flood_layer):
 def observation_block():
     """The satellite hazard layer, plus everything needed to judge it."""
     found = [
-    path
-    for pattern in HAZARD_GLOBS
-    for path in SAR_OUT.glob(pattern)
+        path
+        for pattern in HAZARD_GLOBS
+        for path in SAR_OUT.glob(pattern)
     ]
     if not found:
         raise SystemExit(
             f"No hazard layer in {SAR_OUT}. Run sar-flood/s1_flood.py first - a pack is not "
             "allowed to contain an invented layer.")
-    geojson_path = find_hazard_layer() 
+    geojson_path = find_hazard_layer()
     provenance_path = geojson_path.with_suffix(".json")
     if not provenance_path.exists():
-        raise SystemExit(f"{geojson_path.name} has no matching provenance file. Re-run s1_flood.py.")
+        raise SystemExit(
+            f"{geojson_path.name} has no matching provenance file. Re-run s1_flood.py.")
 
     provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
     patches = gpd.read_file(geojson_path).to_crs(4326)
@@ -373,9 +402,11 @@ def observation_block():
         if rings:
             features.append({"km2": round(float(km2), 3), "rings": rings})
 
-    block = dict(provenance)                 # provenance travels verbatim, nothing rewritten
+    # provenance travels verbatim, nothing rewritten
+    block = dict(provenance)
     # When the satellite passed, read from the scene name (S1A_..._20240821T120442_...), so the
-    # instrument can say "Sentinel-1A, 18:04 Bangladesh time" rather than just a date.
+    # instrument can say "Sentinel-1A, 18:04 Bangladesh time" rather than just
+    # a date.
     flood_scene = (provenance.get("scene_ids") or {}).get("flood", [""])[0]
     if flood_scene.startswith("S1") and "T" in flood_scene:
         stamp = flood_scene.split("_")[4]
@@ -399,7 +430,9 @@ def main():
 
     print("Packing the field context (roads, waterways, shelters)...")
     if not CONTEXT_FILE.exists():
-        raise SystemExit(f"No {CONTEXT_FILE.name}. Run fetch_context.py first.")
+        raise SystemExit(
+            f"No {
+                CONTEXT_FILE.name}. Run fetch_context.py first.")
     context = json.loads(CONTEXT_FILE.read_text(encoding="utf-8"))
     for key in ("roads", "waterways", "shelters", "places"):
         complete_names(context.get(key, []))
@@ -437,7 +470,8 @@ def main():
         "limitations": ("A surface model: it includes buildings and trees and it smooths low flat "
                         "land. It shows the shape of the ground. It is not a flood model."),
         # The picture is embedded so the pack stays one file. Base64 costs about a third in size
-        # and buys a package a responder can hand to somebody else with no network involved.
+        # and buys a package a responder can hand to somebody else with no
+        # network involved.
         "image": "data:image/jpeg;base64," + base64.b64encode(buffer.getvalue()).decode("ascii"),
     }
 
@@ -461,7 +495,8 @@ def main():
         "admin": AREA["admin"],
         "hazard": {"type": HAZARD_TYPE, "label": HAZARD_LABEL},
         "built_on": date.today().isoformat(),
-        # To the second, so an instrument can tell two builds from the same day apart.
+        # To the second, so an instrument can tell two builds from the same day
+        # apart.
         "built_at": datetime.now().isoformat(timespec="seconds"),
         "coverage": {"bbox": [round(v, PLACES) for v in area.bounds],
                      "area_km2": round(float(parts.area_sqkm.sum()), 1),
@@ -499,14 +534,23 @@ def main():
                       "area_km2": head["coverage"]["area_km2"],
                       "size_mb": round(len(raw) / 1024 / 1024, 1),
                       "sha256": digest, "fingerprint": f"{digest[:4]}-{digest[4:8]}".upper()})
-    # newline="\n": on Windows write_text would otherwise turn every line ending into CRLF.
-    (PACKS / "index.json").write_text(json.dumps({"packs": index}, indent=2), encoding="utf-8", newline="\n")
-    fingerprint = next(entry["fingerprint"] for entry in index if entry["file"] == path.name)
-    print(f"\nPack written: packs/{path.name}  ({size_mb:.1f} MB, one file, fingerprint {fingerprint})")
+    # newline="\n": on Windows write_text would otherwise turn every line
+    # ending into CRLF.
+    (PACKS / "index.json").write_text(json.dumps(
+        {"packs": index}, indent=2), encoding="utf-8", newline="\n")
+    fingerprint = next(entry["fingerprint"]
+                       for entry in index if entry["file"] == path.name)
+    print(
+        f"\nPack written: packs/{
+            path.name}  ({
+            size_mb:.1f} MB, one file, fingerprint {fingerprint})")
     print(f"  hazard      {observation['sensor']} {observation['acquisition_date']}, "
           f"{observation['totals']['flood_km2']} km2 open water, "
           f"{observation['feature_count']} patches")
-    print(f"  terrain     {terrain['elevation_m']['min']} to {terrain['elevation_m']['max']} m")
+    print(
+        f"  terrain     {
+            terrain['elevation_m']['min']} to {
+            terrain['elevation_m']['max']} m")
     print(f"  context     {len(context['roads'])} roads, {len(context['waterways'])} waterways, "
           f"{len(context['shelters'])} shelters")
     print(f"  areas       {', '.join(pack['coverage']['places'])}")
