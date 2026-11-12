@@ -1,56 +1,27 @@
 {
   "id": "south-chattogram-2026-07",
   "aoi_name": "South_Chattogram",
-  "name": "South Chattogram July 2026 flood",
-  "name_bn": "দক্ষিণ চট্টগ্রাম জুলাই ২০২৬ বন্যা",
-
+  "name": "South Chattogram NISAR observation",
+  "name_bn": "দক্ষিণ চট্টগ্রাম",
   "outline": "sar-flood/aoi/chattogram_south.geojson",
   "parts": "sar-flood/aoi/chattogram_south_upazilas.geojson",
-
   "admin": {
     "district": "South Chattogram",
     "district_bn": "দক্ষিণ চট্টগ্রাম",
     "division": "Chattogram",
     "division_bn": "চট্টগ্রাম"
   },
-
-  "parts_bn": {
-    "Banshkhali": "বাঁশখালী",
-    "Chandanaish": "চন্দনাইশ",
-    "Lohagara": "লোহাগাড়া",
-    "Satkania": "সাতকানিয়া"
-  },
-
-  "known_names": [
-    ["Banshkhali", "বাঁশখালী"],
-    ["Chandanaish", "চন্দনাইশ"],
-    ["Lohagara", "লোহাগাড়া"],
-    ["Satkania", "সাতকানিয়া"],
-    ["South Chattogram", "দক্ষিণ চট্টগ্রাম"]
-  ],
-
+  "parts_bn": {},
+  "known_names": [],
   "sensor": "nisar",
-  "baseline_date": "2026-06-30",
+  "baseline_date": null,
   "flood_date": "2026-07-12",
-  "track": 69,
-  "direction": "ascending",
-
-  "optical": {
-    "sensor": "Sentinel-2B",
-    "product": "S2B_MSIL2A_20260716T043219_N0510_R091_T46QCK_20260716T072045.SAFE",
-    "scene": "S2B_MSIL2A_20260716T043219_R091_T46QCK_20260716T072045",
-    "date": "2026-07-16",
-    "processing_level": "L2A",
-    "tile": "T46QCK",
-    "scene_cloud_cover_pct": 64.2,
-    "aoi_cloud_cover_pct": null
-  },
-
+  "track": null,
+  "direction": null,
+  "optical": null,
   "event": {
-    "name": "July 2026 South Chattogram floods",
-    "rain_began": "2026-07-05",
-    "flood_arrived": "2026-07-12",
-    "reported_flooded_km2": null,
-    "reported_source": ""
+    "name": "South Chattogram NISAR observation, July 2026",
+    "observation_date": "2026-07-12",
+    "classification": "Open-water observation; not independently validated flood mapping"
   }
 }

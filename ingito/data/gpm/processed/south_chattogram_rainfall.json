@@ -1,0 +1,77 @@
+{
+  "id": "south_chattogram-gpm-daily-rainfall",
+  "region": "south_chattogram",
+  "dataset": "NASA GPM IMERG Daily Late Run",
+  "collection": "GPM_3IMERGDL",
+  "version": "07",
+  "processing_level": "Late Run",
+  "temporal_resolution": "daily",
+  "created_utc": "2026-11-11T18:40:43.291510+00:00",
+  "source_directory": "ingito/data/gpm/south_chattogram",
+  "boundary": "sar-flood/aoi/chattogram_south.geojson",
+  "daily_observations": [
+    {
+      "date": "2026-07-10",
+      "source_file": "3B-DAY-L.MS.MRG.3IMERG.20260710-S000000-E235959.V07C.nc4",
+      "variable": "precipitation",
+      "units": "mm/day",
+      "pixel_count": 9,
+      "mean": 42.7689,
+      "maximum": 70.595,
+      "minimum": 24.68,
+      "median": 38.885,
+      "sum_of_pixel_values": 384.92
+    },
+    {
+      "date": "2026-07-11",
+      "source_file": "3B-DAY-L.MS.MRG.3IMERG.20260711-S000000-E235959.V07C.nc4",
+      "variable": "precipitation",
+      "units": "mm/day",
+      "pixel_count": 9,
+      "mean": 48.4711,
+      "maximum": 63.44,
+      "minimum": 36.21,
+      "median": 46.935,
+      "sum_of_pixel_values": 436.24
+    },
+    {
+      "date": "2026-07-12",
+      "source_file": "3B-DAY-L.MS.MRG.3IMERG.20260712-S000000-E235959.V07C.nc4",
+      "variable": "precipitation",
+      "units": "mm/day",
+      "pixel_count": 9,
+      "mean": 56.2933,
+      "maximum": 70.265,
+      "minimum": 50.915,
+      "median": 53.815,
+      "sum_of_pixel_values": 506.64
+    },
+    {
+      "date": "2026-07-13",
+      "source_file": "3B-DAY-L.MS.MRG.3IMERG.20260713-S000000-E235959.V07C.nc4",
+      "variable": "precipitation",
+      "units": "mm/day",
+      "pixel_count": 9,
+      "mean": 3.3717,
+      "maximum": 4.9,
+      "minimum": 1.82,
+      "median": 3.37,
+      "sum_of_pixel_values": 30.345
+    },
+    {
+      "date": "2026-07-14",
+      "source_file": "3B-DAY-L.MS.MRG.3IMERG.20260714-S000000-E235959.V07C.nc4",
+      "variable": "precipitation",
+      "units": "mm/day",
+      "pixel_count": 9,
+      "mean": 6.55,
+      "maximum": 8.96,
+      "minimum": 3.925,
+      "median": 7.05,
+      "sum_of_pixel_values": 58.95
+    }
+  ],
+  "successful_files": 5,
+  "failed_files": [],
+  "quality_note": "Rainfall observations are contextual precipitation estimates, not direct flood extent measurements."
+}

@@ -58,7 +58,7 @@ AREA = load_area()
 AOI_FILE = INGITO.parent / AREA["outline"]
 AOI_NAME = AREA["aoi_name"].lower()
 
-OVERPASS = "https://overpass-api.de/api/interpreter"
+OVERPASS = "https://overpass.private.coffee/api/interpreter"
 # Overpass rejects anonymous scripts with HTTP 406, so identify the project honestly.
 AGENT = {"User-Agent": "NSAC-SpaceApps-flood-pack/1.0 (student project, github.com/Nishorgo3051)"}
 ATTRIBUTION = ("Roads, waterways, place names and shelter points: OpenStreetMap contributors, ODbL. "
